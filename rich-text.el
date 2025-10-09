@@ -1,3 +1,5 @@
+;;; rich-text-db.el --- Database backend for rich-text -*- lexical-binding: t -*-
+
 (require 'cl-macs)
 (require 'rich-text-db)
 
@@ -59,13 +61,55 @@
 ;; (defvar rich-text-font-dark-colors '("#F44336" "#009688" "#FF9800" "#00BCD4")
 ;;   "Preset a list of rich-text font colors in dark themes.")
 
-;;; highlight
+;;; highlight - 改进：支持终端和 GUI
 
-(defvar rich-text-highlight-light-color "#F7E987"
-  "Default color of rich-text highlight color in light theme.")
+;; Light theme 颜色配置
+(defvar rich-text-highlight-light-bg "#FFEAA7"
+  "Background color for highlight in light theme (GUI).")
 
-(defvar rich-text-highlight-dark-color "#C58940"
-  "Default color of rich-text highlight color in dark theme.")
+(defvar rich-text-highlight-light-fg "#000000"
+  "Foreground color for highlight in light theme (GUI).")
+
+(defvar rich-text-highlight-light-bg-term "yellow"
+  "Background color for highlight in light theme (terminal).")
+
+(defvar rich-text-highlight-light-fg-term "black"
+  "Foreground color for highlight in light theme (terminal).")
+
+;; Dark theme 颜色配置
+(defvar rich-text-highlight-dark-bg "#4B5263"
+  "Background color for highlight in dark theme (GUI).")
+
+(defvar rich-text-highlight-dark-fg "#E5C07B"
+  "Foreground color for highlight in dark theme (GUI).")
+
+(defvar rich-text-highlight-dark-bg-term "blue"
+  "Background color for highlight in dark theme (terminal).")
+
+(defvar rich-text-highlight-dark-fg-term "yellow"
+  "Foreground color for highlight in dark theme (terminal).")
+
+;; 预设多种颜色方案（可选）
+(defvar rich-text-highlight-color-schemes
+  '((scheme-1 
+     :light-bg "#FFEAA7" :light-fg "#000000"
+     :dark-bg "#4B5263" :dark-fg "#E5C07B"
+     :light-term-bg "yellow" :light-term-fg "black"
+     :dark-term-bg "blue" :dark-term-fg "yellow")
+    (scheme-2
+     :light-bg "#A8E6CF" :light-fg "#000000"
+     :dark-bg "#2C5F2D" :dark-fg "#98C379"
+     :light-term-bg "green" :light-term-fg "black"
+     :dark-term-bg "green" :dark-term-fg "white")
+    (scheme-3
+     :light-bg "#FFD3B6" :light-fg "#000000"
+     :dark-bg "#5C4742" :dark-fg "#D19A66"
+     :light-term-bg "cyan" :light-term-fg "black"
+     :dark-term-bg "cyan" :dark-term-fg "white"))
+  "Predefined color schemes for highlights.")
+
+(defvar rich-text-current-color-scheme 'scheme-1
+  "Current color scheme for highlights.")
 
 ;; (defvar rich-text-highlight-light-colors '("#F44336" "#009688" "#FF9800" "#00BCD4")
 ;;   "Preset a list of rich-text highlight colors in light themes.")
@@ -95,6 +139,19 @@
 
 (defvar rich-text-alist nil)
 
+;;;; Helper functions
+
+(defun rich-text-display-graphic-p ()
+  "Check if current display supports graphic (GUI)."
+  (display-graphic-p))
+
+(defun rich-text-get-color (light-gui dark-gui light-term dark-term)
+  "Get appropriate color based on theme and display type.
+Return GUI color for graphic display, terminal color otherwise."
+  (if (rich-text-display-graphic-p)
+      (if (rich-text-theme-light-p) light-gui dark-gui)
+    (if (rich-text-theme-light-p) light-term dark-term)))
+
 ;;;; Define rich text face
 
 (defun keys-of-command (command keymap)
@@ -119,6 +176,12 @@ ALIST consists with key and command."
           alist))
 
 (cl-defmacro define-rich-text (name key props)
+  "Define a rich-text style with NAME, triggered by KEY, applying PROPS.
+NAME should be an unquoted symbol."
+  (declare (indent defun))
+  ;; 确保 name 是符号
+  (unless (symbolp name)
+    (error "define-rich-text: NAME must be a symbol, got %S" name))
   (let* ((name-str (symbol-name name))
          (func-prefix "rich-text-render-")
          (render-func (intern (concat func-prefix name-str))))
@@ -130,15 +193,26 @@ ALIST consists with key and command."
        (define-key selected-keymap ,key #',render-func))))
 
 (cl-defmacro define-rich-text-dwim (name key &key props light dark)
+  "Define a theme-aware rich-text style with NAME, triggered by KEY.
+NAME should be an unquoted symbol.
+PROPS is the default properties.
+LIGHT and DARK are theme-specific properties."
+  (declare (indent defun))
+  ;; 确保 name 是符号
+  (unless (symbolp name)
+    (error "define-rich-text-dwim: NAME must be a symbol, got %S" name))
   (let* ((name-str (symbol-name name))
          (func-prefix "rich-text-render-")
          (render-func (intern (concat func-prefix name-str "-dwim"))))
-    (when-let ((lst (assoc name rich-text-alist)))
-      (setq rich-text-alist (remove lst rich-text-alist)))
-    (add-to-list 'rich-text-alist
-                 (list name :key key :props (eval props)
-                       :light (eval light) :dark (eval dark)))
+    ;; 在宏展开时（编译时）更新 alist
     `(progn
+       ;; 在运行时更新 alist
+       (let ((lst (assoc ',name rich-text-alist)))
+         (when lst
+           (setq rich-text-alist (remove lst rich-text-alist))))
+       (add-to-list 'rich-text-alist
+                    (list ',name :key ,key :props ,props
+                          :light ,light :dark ,dark))
        (defun ,render-func ()
          (interactive)
          (let (theme-props)
@@ -187,13 +261,30 @@ ALIST consists with key and command."
 (defun rich-text-fontcolor-dark-props ()
   `(face (:foreground ,rich-text-fontcolor-dark-color)))
 
+;; 改进：支持终端和 GUI 的高亮颜色
 (defun rich-text-highlight-light-props ()
-  `(face (:background ,rich-text-highlight-light-color
-                      :foreground "light")))
+  "Get highlight properties for light theme."
+  (if (rich-text-display-graphic-p)
+      ;; GUI mode
+      `(face (:background ,rich-text-highlight-light-bg 
+                          :foreground ,rich-text-highlight-light-fg 
+                          :weight bold))
+    ;; Terminal mode
+    `(face (:background ,rich-text-highlight-light-bg-term 
+                        :foreground ,rich-text-highlight-light-fg-term 
+                        :weight bold))))
 
 (defun rich-text-highlight-dark-props ()
-  `(face (:background ,rich-text-highlight-dark-color
-                      :foreground "black")))
+  "Get highlight properties for dark theme."
+  (if (rich-text-display-graphic-p)
+      ;; GUI mode
+      `(face (:background ,rich-text-highlight-dark-bg 
+                          :foreground ,rich-text-highlight-dark-fg 
+                          :weight bold))
+    ;; Terminal mode
+    `(face (:background ,rich-text-highlight-dark-bg-term 
+                        :foreground ,rich-text-highlight-dark-fg-term 
+                        :weight bold))))
 
 ;;;; Specific for light/dark themes
 
@@ -336,6 +427,182 @@ ALIST consists with key and command."
             specs)
     (message "%s rich-text overlays restored!" (length specs))
     (rich-text-reverse-all)))
+
+;;;; 新增：清除样式命令（同步到数据库）
+
+(defun rich-text-sync-clear-to-db ()
+  "Sync current buffer's overlay state to database after clearing.
+This ensures database matches the current buffer state."
+  (when-let ((id (rich-text-buffer-or-file-id)))
+    ;; 删除当前文件的所有 DB 记录
+    (rich-text-db-delete 'ov `(= id ,id))
+    ;; 重新保存当前剩余的 overlays
+    (when-let ((specs (rich-text-buffer-ov-specs)))
+      (dolist (spec specs)
+        (rich-text-store-curr-ov spec)))))
+
+;;;###autoload
+(defun rich-text-clear-region (beg end &optional no-sync)
+  "Clear all rich-text overlays in region from BEG to END.
+If NO-SYNC is non-nil, don't sync to database."
+  (interactive "r")
+  (let ((count 0))
+    (dolist (ov (overlays-in beg end))
+      (when (overlay-get ov 'rich-text)
+        (delete-overlay ov)
+        (setq count (1+ count))))
+    (unless no-sync
+      (rich-text-sync-clear-to-db))
+    (message "Cleared %d rich-text overlay%s in region%s" 
+             count 
+             (if (= count 1) "" "s")
+             (if no-sync "" " (synced to DB)"))))
+
+;;;###autoload
+(defun rich-text-clear-buffer (&optional no-sync)
+  "Clear all rich-text overlays in current buffer.
+If NO-SYNC is non-nil, don't sync to database."
+  (interactive)
+  (let ((count 0)
+        (id (rich-text-buffer-or-file-id)))
+    (dolist (ov (overlays-in (point-min) (point-max)))
+      (when (overlay-get ov 'rich-text)
+        (delete-overlay ov)
+        (setq count (1+ count))))
+    (unless no-sync
+      ;; 清空当前文件在 DB 中的所有记录
+      (when id
+        (rich-text-db-delete 'ov `(= id ,id))))
+    (message "Cleared %d rich-text overlay%s in buffer%s" 
+             count 
+             (if (= count 1) "" "s")
+             (if no-sync "" " (synced to DB)"))))
+
+;;;###autoload
+(defun rich-text-clear-at-point (&optional no-sync)
+  "Clear rich-text overlay at point.
+If NO-SYNC is non-nil, don't sync to database."
+  (interactive)
+  (let ((cleared nil))
+    (dolist (ov (overlays-at (point)))
+      (when (overlay-get ov 'rich-text)
+        (delete-overlay ov)
+        (setq cleared t)))
+    (unless no-sync
+      (rich-text-sync-clear-to-db))
+    (if cleared
+        (message "Cleared rich-text overlay at point%s"
+                 (if no-sync "" " (synced to DB)"))
+      (message "No rich-text overlay at point"))))
+
+;;;###autoload
+(defun rich-text-clear-all-buffers (&optional no-sync)
+  "Clear all rich-text overlays in all buffers.
+If NO-SYNC is non-nil, don't sync to database."
+  (interactive)
+  (let ((total-count 0)
+        (file-ids '()))
+    (dolist (buffer (buffer-list))
+      (with-current-buffer buffer
+        (let ((count 0)
+              (id (rich-text-buffer-or-file-id)))
+          (dolist (ov (overlays-in (point-min) (point-max)))
+            (when (overlay-get ov 'rich-text)
+              (delete-overlay ov)
+              (setq count (1+ count))))
+          (setq total-count (+ total-count count))
+          (when (and id (> count 0))
+            (push id file-ids)))))
+    (unless no-sync
+      ;; 删除所有清除了 overlay 的文件的 DB 记录
+      (dolist (id file-ids)
+        (rich-text-db-delete 'ov `(= id ,id))))
+    (message "Cleared %d rich-text overlay%s in all buffers%s" 
+             total-count 
+             (if (= total-count 1) "" "s")
+             (if no-sync "" " (synced to DB)"))))
+
+;;;###autoload
+(defun rich-text-list-overlays ()
+  "List all rich-text overlays in current buffer."
+  (interactive)
+  (let ((overlays '()))
+    (dolist (ov (overlays-in (point-min) (point-max)))
+      (when (overlay-get ov 'rich-text)
+        (push (list :start (overlay-start ov)
+                    :end (overlay-end ov)
+                    :type (overlay-get ov 'rich-text)
+                    :text (buffer-substring (overlay-start ov) (overlay-end ov)))
+              overlays)))
+    (if overlays
+        (progn
+          (with-current-buffer (get-buffer-create "*Rich-Text Overlays*")
+            (erase-buffer)
+            (insert (format "Rich-text overlays in buffer: %s\n\n" (buffer-name)))
+            (dolist (ov (reverse overlays))
+              (insert (format "Type: %s\nRange: %d-%d\nText: %s\n\n"
+                              (plist-get ov :type)
+                              (plist-get ov :start)
+                              (plist-get ov :end)
+                              (plist-get ov :text))))
+            (goto-char (point-min)))
+          (display-buffer "*Rich-Text Overlays*")
+          (message "Found %d rich-text overlay%s" 
+                   (length overlays) 
+                   (if (= (length overlays) 1) "" "s")))
+      (message "No rich-text overlays in buffer"))))
+
+;;;; 新增：颜色自定义命令
+
+;;;###autoload
+(defun rich-text-set-highlight-colors (light-bg light-fg dark-bg dark-fg)
+  "Set custom highlight colors for GUI display.
+LIGHT-BG and LIGHT-FG for light theme.
+DARK-BG and DARK-FG for dark theme."
+  (interactive
+   (list
+    (read-string "Light theme background (GUI): " rich-text-highlight-light-bg)
+    (read-string "Light theme foreground (GUI): " rich-text-highlight-light-fg)
+    (read-string "Dark theme background (GUI): " rich-text-highlight-dark-bg)
+    (read-string "Dark theme foreground (GUI): " rich-text-highlight-dark-fg)))
+  (setq rich-text-highlight-light-bg light-bg
+        rich-text-highlight-light-fg light-fg
+        rich-text-highlight-dark-bg dark-bg
+        rich-text-highlight-dark-fg dark-fg)
+  (message "Highlight colors updated. Refresh overlays to see changes."))
+
+;;;###autoload
+(defun rich-text-set-highlight-colors-term (light-bg light-fg dark-bg dark-fg)
+  "Set custom highlight colors for terminal display.
+LIGHT-BG and LIGHT-FG for light theme.
+DARK-BG and DARK-FG for dark theme.
+Use terminal color names like: black, red, green, yellow, blue, magenta, cyan, white."
+  (interactive
+   (list
+    (completing-read "Light theme background (term): " 
+                     '("black" "red" "green" "yellow" "blue" "magenta" "cyan" "white")
+                     nil nil rich-text-highlight-light-bg-term)
+    (completing-read "Light theme foreground (term): " 
+                     '("black" "red" "green" "yellow" "blue" "magenta" "cyan" "white")
+                     nil nil rich-text-highlight-light-fg-term)
+    (completing-read "Dark theme background (term): " 
+                     '("black" "red" "green" "yellow" "blue" "magenta" "cyan" "white")
+                     nil nil rich-text-highlight-dark-bg-term)
+    (completing-read "Dark theme foreground (term): " 
+                     '("black" "red" "green" "yellow" "blue" "magenta" "cyan" "white")
+                     nil nil rich-text-highlight-dark-fg-term)))
+  (setq rich-text-highlight-light-bg-term light-bg
+        rich-text-highlight-light-fg-term light-fg
+        rich-text-highlight-dark-bg-term dark-bg
+        rich-text-highlight-dark-fg-term dark-fg)
+  (message "Terminal highlight colors updated. Refresh overlays to see changes."))
+
+;;;###autoload
+(defun rich-text-refresh-all-overlays ()
+  "Refresh all rich-text overlays in current buffer with current color settings."
+  (interactive)
+  (rich-text-reverse)
+  (message "Refreshed all rich-text overlays"))
 
 ;;;; Rich text mode
 
