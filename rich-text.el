@@ -1,4 +1,4 @@
-;;; rich-text-db.el --- Database backend for rich-text -*- lexical-binding: t -*-
+;;; rich-text.el --- Rich text formatting for Emacs buffers -*- lexical-binding: t -*-
 
 (require 'cl-macs)
 (require 'rich-text-db)
@@ -88,6 +88,13 @@
 
 (defvar rich-text-highlight-dark-fg-term "yellow"
   "Foreground color for highlight in dark theme (terminal).")
+
+;; 强制主题模式（用于透明背景的终端）
+(defvar rich-text-force-theme-mode nil
+  "Force theme mode to 'light or 'dark.
+Useful when using transparent terminal background where Emacs
+cannot detect the theme mode correctly.
+Set to nil to use automatic detection.")
 
 ;; 预设多种颜色方案（可选）
 (defvar rich-text-highlight-color-schemes
@@ -263,25 +270,27 @@ LIGHT and DARK are theme-specific properties."
 
 ;; 改进：支持终端和 GUI 的高亮颜色
 (defun rich-text-highlight-light-props ()
-  "Get highlight properties for light theme."
+  "Get highlight properties for LIGHT theme.
+Returns GUI colors if in graphic display, terminal colors otherwise."
   (if (rich-text-display-graphic-p)
-      ;; GUI mode
+      ;; GUI mode - 浅色主题
       `(face (:background ,rich-text-highlight-light-bg 
                           :foreground ,rich-text-highlight-light-fg 
                           :weight bold))
-    ;; Terminal mode
+    ;; Terminal mode - 浅色主题
     `(face (:background ,rich-text-highlight-light-bg-term 
                         :foreground ,rich-text-highlight-light-fg-term 
                         :weight bold))))
 
 (defun rich-text-highlight-dark-props ()
-  "Get highlight properties for dark theme."
+  "Get highlight properties for DARK theme.
+Returns GUI colors if in graphic display, terminal colors otherwise."
   (if (rich-text-display-graphic-p)
-      ;; GUI mode
+      ;; GUI mode - 深色主题
       `(face (:background ,rich-text-highlight-dark-bg 
                           :foreground ,rich-text-highlight-dark-fg 
                           :weight bold))
-    ;; Terminal mode
+    ;; Terminal mode - 深色主题
     `(face (:background ,rich-text-highlight-dark-bg-term 
                         :foreground ,rich-text-highlight-dark-fg-term 
                         :weight bold))))
@@ -289,10 +298,44 @@ LIGHT and DARK are theme-specific properties."
 ;;;; Specific for light/dark themes
 
 (defun rich-text-theme-dark-p ()
-  (eq (frame-parameter nil 'background-mode) 'dark))
+  "Check if current theme is dark.
+Handles cases where background is unspecified in terminal.
+Respects `rich-text-force-theme-mode' if set."
+  (cond
+   ;; 强制模式优先
+   ((eq rich-text-force-theme-mode 'dark) t)
+   ((eq rich-text-force-theme-mode 'light) nil)
+   ;; 正常检测
+   ((eq (frame-parameter nil 'background-mode) 'dark) t)
+   ;; 如果无法检测，检查主题名称
+   ((and (not (display-graphic-p))
+         (boundp 'custom-enabled-themes)
+         (seq-some (lambda (theme)
+                     (string-match-p "dark\\|night\\|gruvbox-dark" 
+                                     (symbol-name theme)))
+                   custom-enabled-themes))
+    t)
+   (t nil)))
 
 (defun rich-text-theme-light-p ()
-  (eq (frame-parameter nil 'background-mode) 'light))
+  "Check if current theme is light.
+Handles cases where background is unspecified in terminal.
+Respects `rich-text-force-theme-mode' if set."
+  (cond
+   ;; 强制模式优先
+   ((eq rich-text-force-theme-mode 'light) t)
+   ((eq rich-text-force-theme-mode 'dark) nil)
+   ;; 正常检测
+   ((eq (frame-parameter nil 'background-mode) 'light) t)
+   ;; 如果无法检测，检查主题名称
+   ((and (not (display-graphic-p))
+         (boundp 'custom-enabled-themes)
+         (seq-some (lambda (theme)
+                     (string-match-p "light\\|day\\|gruvbox-light" 
+                                     (symbol-name theme)))
+                   custom-enabled-themes))
+    t)
+   (t nil)))
 
 ;; (defun rich-text-underline-colors-by-theme ()
 ;;   "Return a list of underline colors according to the type of theme."
@@ -339,7 +382,8 @@ LIGHT and DARK are theme-specific properties."
     (setq ov (ov-set ov '(evaporate t)))
     ;; indicate a overlay set by rich text.
     (setq ov (ov-set ov `(rich-text ,name)))
-    (rich-text-store-curr-ov (car (ov-spec ov)))))
+    ;; ✓ 只存储样式名称，不存储具体的颜色值
+    (rich-text-store-curr-ov-name name (car (ov-spec ov)))))
 
 (defun rich-text-get-props (rich-text-name)
   (let ((plist (cdr (assoc rich-text-name rich-text-alist))))
@@ -392,6 +436,17 @@ LIGHT and DARK are theme-specific properties."
 (defun rich-text-buffer-stored-p (id)
   (cl-member id (rich-text-all-id) :test 'string=))
 
+;; ✓ 新函数：只存储样式名称
+(defun rich-text-store-curr-ov-name (style-name ov-spec)
+  "Store overlay with STYLE-NAME instead of actual props.
+This ensures cross-environment compatibility."
+  (when-let* ((beg (nth 0 ov-spec))
+              (end (nth 1 ov-spec))
+              (id (rich-text-buffer-or-file-id (nth 2 ov-spec))))
+    ;; 存储样式名称，而不是具体的 props
+    (rich-text-db-insert 'ov `([,id ,beg ,end ,(prin1-to-string style-name)]))))
+
+;; 保留旧函数用于兼容性
 (defun rich-text-store-curr-ov (ov-spec)
   (when-let* ((beg (nth 0 ov-spec))
               (end (nth 1 ov-spec))
@@ -407,24 +462,52 @@ LIGHT and DARK are theme-specific properties."
               (ov-spec (ov-in))))
 
 (defun rich-text-store-buffer-ov ()
+  "Store current buffer's overlays to database.
+Stores style names instead of actual props for cross-environment compatibility."
   (let ((count (rich-text-db-query-count 'ov `(= id ,(rich-text-buffer-or-file-id)))))
     (when (not (= count 0))
       (rich-text-db-delete 'ov `(= id ,(rich-text-buffer-or-file-id))))
-    (when-let ((specs (rich-text-buffer-ov-specs)))
-      (mapcar (lambda (spec)
-                (rich-text-store-curr-ov spec))
-              specs))))
+    (when-let ((ovs (ov-in 'rich-text)))
+      (dolist (ov ovs)
+        (let* ((style-name (ov-val ov 'rich-text))
+               (beg (overlay-start ov))
+               (end (overlay-end ov))
+               (id (rich-text-buffer-or-file-id)))
+          (when (and style-name beg end id)
+            (rich-text-db-insert 'ov 
+              `([,id ,beg ,end ,(prin1-to-string style-name)]))))))))
 
 ;;;###autoload
 (defun rich-text-restore-buffer-ov ()
+  "Restore overlays from database, applying current environment's colors."
   (interactive)
   (when-let* ((id (rich-text-buffer-or-file-id))
               (_ (rich-text-buffer-stored-p id))
               (specs (rich-text-db-query 'ov [beg end props]
                                          `(= id ,id))))
-    (mapcar (lambda (spec)
-              (ov (nth 0 spec) (nth 1 spec) (nth 2 spec)))
-            specs)
+    (dolist (spec specs)
+      (let* ((beg (nth 0 spec))
+             (end (nth 1 spec))
+             (stored-data (nth 2 spec))
+             style-name
+             props)
+        ;; 尝试解析存储的数据
+        (condition-case nil
+            (setq style-name (read stored-data))
+          (error nil))
+        
+        ;; 如果是符号（样式名），根据当前环境生成 props
+        (if (symbolp style-name)
+            (progn
+              (setq props (rich-text-get-props style-name))
+              (when props
+                (let ((ov (ov beg end props)))
+                  (ov-set ov 'rich-text style-name)
+                  (ov-set ov 'reverse-p t)
+                  (ov-set ov 'evaporate t))))
+          ;; 否则使用旧格式（直接存储的 props）
+          (setq props stored-data)
+          (ov beg end props))))
     (message "%s rich-text overlays restored!" (length specs))
     (rich-text-reverse-all)))
 
@@ -690,3 +773,5 @@ Use terminal color names like: black, red, green, yellow, blue, magenta, cyan, w
   :dark (rich-text-highlight-dark-props))
 
 (provide 'rich-text)
+
+;;; rich-text.el ends here
