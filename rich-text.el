@@ -436,15 +436,34 @@ Respects `rich-text-force-theme-mode' if set."
 (defun rich-text-buffer-stored-p (id)
   (cl-member id (rich-text-all-id) :test 'string=))
 
-;; ✓ 新函数：只存储样式名称
+;; ✓ 新函数：只存储样式名称（支持 UPDATE）
 (defun rich-text-store-curr-ov-name (style-name ov-spec)
   "Store overlay with STYLE-NAME instead of actual props.
-This ensures cross-environment compatibility."
+This ensures cross-environment compatibility.
+If record exists, UPDATE it; otherwise INSERT."
   (when-let* ((beg (nth 0 ov-spec))
               (end (nth 1 ov-spec))
               (id (rich-text-buffer-or-file-id (nth 2 ov-spec))))
-    ;; 存储样式名称，而不是具体的 props
-    (rich-text-db-insert 'ov `([,id ,beg ,end ,(prin1-to-string style-name)]))))
+    ;; 查询是否已存在相同位置的记录
+    (let ((old (car (rich-text-db-crud
+                     `[:select rowid :from ov
+                       :where (and (= id ,id) (= beg ,beg) (= end ,end))]))))
+      (if old
+          ;; 更新已有记录
+          (rich-text-db-crud
+           `[:update ov :set (= props ,(prin1-to-string style-name))
+             :where (= rowid ,(car old))])
+        ;; 插入新记录
+        (rich-text-db-insert
+         'ov `([,id ,beg ,end ,(prin1-to-string style-name)]))))))
+
+;; ✓ 新函数：精准删除单个 overlay 的 DB 记录
+(defun rich-text-delete-ov-from-db (id beg end)
+  "Delete the single ov record that matches ID BEG END.
+This ensures only the specific overlay is removed from database."
+  (rich-text-db-crud
+   `[:delete :from ov
+     :where (and (= id ,id) (= beg ,beg) (= end ,end))]))
 
 ;; 保留旧函数用于兼容性
 (defun rich-text-store-curr-ov (ov-spec)
@@ -511,7 +530,7 @@ Stores style names instead of actual props for cross-environment compatibility."
     (message "%s rich-text overlays restored!" (length specs))
     (rich-text-reverse-all)))
 
-;;;; 新增：清除样式命令（同步到数据库）
+;;;; 新增：清除样式命令（同步到数据库 - 精准删除版本）
 
 (defun rich-text-sync-clear-to-db ()
   "Sync current buffer's overlay state to database after clearing.
@@ -527,15 +546,19 @@ This ensures database matches the current buffer state."
 ;;;###autoload
 (defun rich-text-clear-region (beg end &optional no-sync)
   "Clear all rich-text overlays in region from BEG to END.
-If NO-SYNC is non-nil, don't sync to database."
+If NO-SYNC is non-nil, don't sync to database.
+✓ 精准删除：只删除被清除的 overlay 对应的 DB 记录。"
   (interactive "r")
-  (let ((count 0))
+  (let ((id (rich-text-buffer-or-file-id))
+        (count 0))
     (dolist (ov (overlays-in beg end))
       (when (overlay-get ov 'rich-text)
-        (delete-overlay ov)
-        (setq count (1+ count))))
-    (unless no-sync
-      (rich-text-sync-clear-to-db))
+        (let ((ov-beg (overlay-start ov))
+              (ov-end (overlay-end ov)))
+          (delete-overlay ov)
+          (setq count (1+ count))
+          (unless no-sync
+            (rich-text-delete-ov-from-db id ov-beg ov-end)))))
     (message "Cleared %d rich-text overlay%s in region%s" 
              count 
              (if (= count 1) "" "s")
@@ -564,15 +587,19 @@ If NO-SYNC is non-nil, don't sync to database."
 ;;;###autoload
 (defun rich-text-clear-at-point (&optional no-sync)
   "Clear rich-text overlay at point.
-If NO-SYNC is non-nil, don't sync to database."
+If NO-SYNC is non-nil, don't sync to database.
+✓ 精准删除：只删除光标处的 overlay 对应的 DB 记录。"
   (interactive)
-  (let ((cleared nil))
+  (let ((cleared nil)
+        (id (rich-text-buffer-or-file-id)))
     (dolist (ov (overlays-at (point)))
       (when (overlay-get ov 'rich-text)
-        (delete-overlay ov)
-        (setq cleared t)))
-    (unless no-sync
-      (rich-text-sync-clear-to-db))
+        (let ((beg (overlay-start ov))
+              (end (overlay-end ov)))
+          (delete-overlay ov)
+          (setq cleared t)
+          (unless no-sync
+            (rich-text-delete-ov-from-db id beg end)))))
     (if cleared
         (message "Cleared rich-text overlay at point%s"
                  (if no-sync "" " (synced to DB)"))
