@@ -1,3 +1,5 @@
+;;; rich-text-db.el --- SQLite backend for rich text overlays -*- lexical-binding: t; -*-
+
 (require 'emacsql)
 (require 'emacsql-sqlite-builtin)
 
@@ -23,7 +25,6 @@
 	(make-directory (file-name-directory rich-text-db-file) t)
 	(let ((conn (emacsql-sqlite-builtin rich-text-db-file)))
 	  (puthash rich-text-db-file conn rich-text-db--conn)
-	  ;; 总是尝试初始化表（如果表已存在则跳过）
 	  (rich-text-db--init conn)))
   (rich-text-db--get-conn))
 
@@ -108,15 +109,19 @@ Keybindings in the list buffer:
 								  (file-name-nondirectory current-file)
 								  count
 								  (if (= count 1) "" "s")))
-				  ;; 为文件名创建按钮
 				  (make-button file-start (1- (point))
 							   'action `(lambda (_button)
 										  (when (file-exists-p ,current-file)
 											(find-file ,current-file)))
-							   'other-window-action `(lambda (_button)
-													   (when (file-exists-p ,current-file)
-														 (find-file-other-window ,current-file)
-														 (other-window 1)))
+							   'other-window-action
+							   `(lambda (_button)
+								  (when (file-exists-p ,current-file)
+									(let ((target-buf (find-file-noselect ,current-file)))
+									  (display-buffer target-buf)
+									  (with-selected-window (get-buffer-window target-buf)
+										(goto-char (point-min))
+										(recenter))
+									  (select-window (get-buffer-window "*Rich-Text Files*")))))
 							   'follow-link t
 							   'file-path current-file
 							   'help-echo (format "Click/RET: open | o: other window | %s" current-file))
@@ -133,27 +138,30 @@ Keybindings in the list buffer:
 							 (ov-start (point))
 							 (current-beg beg)
 							 (current-end end))
-						;; 插入 overlay 信息（可点击）
 						(insert (format "    ├─ [%s] at %d-%d\n"
 										style-name current-beg current-end))
-						;; 为 overlay 行创建按钮
+						;; 修正版：在 other-window-action 中加入 recenter 居中显示
 						(make-button ov-start (1- (point))
-									 'action `(lambda (_button)
-												(when (file-exists-p ,current-file)
-												  (find-file ,current-file)
-												  (goto-char ,current-beg)
-												  (pulse-momentary-highlight-region
-												   ,current-beg ,current-end)))
-									 'other-window-action `(lambda (_button)
-															 (when (file-exists-p ,current-file)
-															   (let ((target-buf (find-file-noselect ,current-file)))
-																 (display-buffer target-buf)
-																 (with-current-buffer target-buf
-																   (goto-char ,current-beg)
-																   (pulse-momentary-highlight-region
-																	,current-beg ,current-end))
-																 ;; 确保光标回到列表窗口
-																 (select-window (get-buffer-window "*Rich-Text Files*")))))
+									 'action
+									 `(lambda (_button)
+										(when (file-exists-p ,current-file)
+										  (find-file ,current-file)
+										  (goto-char ,current-beg)
+										  (recenter)
+										  (pulse-momentary-highlight-region
+										   ,current-beg ,current-end)))
+									 'other-window-action
+									 `(lambda (_button)
+										(when (file-exists-p ,current-file)
+										  (let ((target-buf (find-file-noselect ,current-file)))
+											(display-buffer target-buf)
+											(with-selected-window (get-buffer-window target-buf)
+											  (goto-char ,current-beg)
+											  (recenter) ;; 居中显示跳转位置
+											  (pulse-momentary-highlight-region
+											   ,current-beg ,current-end))
+											;; 回到列表窗口
+											(select-window (get-buffer-window "*Rich-Text Files*")))))
 									 'follow-link t
 									 'file-path current-file
 									 'beg current-beg
@@ -243,13 +251,12 @@ FILE-ID is the file path."
 		(when files
 		  (insert "Overlays per file (click to open):\n")
 		  (dolist (file files)
-			(let* ((current-file file)  ; 捕获当前文件
+			(let* ((current-file file)
 				   (count (rich-text-db-query-count 'ov `(= id ,current-file)))
 				   (line-start (point)))
 			  (insert (format "  %s: %d\n"
 							  (file-name-nondirectory current-file)
 							  count))
-			  ;; 为每个文件名创建按钮 - 使用反引号捕获值
 			  (make-button line-start (1- (point))
 						   'action `(lambda (_button)
 									  (when (file-exists-p ,current-file)
@@ -289,3 +296,4 @@ FILE-ID is the file path."
 		(message "Buffer has no associated file")))))
 
 (provide 'rich-text-db)
+;;; rich-text-db.el ends here
