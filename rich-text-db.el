@@ -79,29 +79,114 @@ SQL can be either the emacsql vector representation, or a string."
 (defun rich-text-db-update (table conds)
   (rich-text-db-crud `[:delete :from ,table :where ,conds]))
 
-;;;; 新增：多文件管理功能
+;;;; 新增：多文件管理功能（改进版 - 支持跳转）
 
 ;;;###autoload
 (defun rich-text-db-list-files ()
-  "List all files that have rich-text overlays stored in database."
+  "List all files that have rich-text overlays stored in database.
+Click on file names to open them, click on overlay entries to jump to position.
+
+Keybindings in the list buffer:
+  RET / mouse-click: Jump to location and switch to that window
+  o: Open in other window but keep focus on list
+  q: Quit the list window"
   (interactive)
   (let ((files (mapcar #'car (rich-text-db-distinct-query 'ov [id]))))
 	(if files
 		(progn
 		  (with-current-buffer (get-buffer-create "*Rich-Text Files*")
-			(erase-buffer)
-			(insert "Files with rich-text overlays:\n\n")
-			(dolist (file files)
-			  (let ((count (rich-text-db-query-count 'ov `(= id ,file))))
-				(insert (format "%s (%d overlay%s)\n"
-								file count (if (= count 1) "" "s")))))
-			(goto-char (point-min))
-			(special-mode))
-		  (display-buffer "*Rich-Text Files*")
-		  (message "Found %d file%s with rich-text overlays"
+			(let ((inhibit-read-only t))
+			  (erase-buffer)
+			  (insert "Files with rich-text overlays:\n")
+			  (insert "RET/Click: jump and switch | o: open in other window | q: quit\n\n")
+			  (dolist (file files)
+				(let* ((current-file file)
+					   (count (rich-text-db-query-count 'ov `(= id ,current-file)))
+					   (file-start (point)))
+				  ;; 插入文件名（可点击）
+				  (insert (format "📄 %s (%d overlay%s)\n"
+								  (file-name-nondirectory current-file)
+								  count
+								  (if (= count 1) "" "s")))
+				  ;; 为文件名创建按钮
+				  (make-button file-start (1- (point))
+							   'action `(lambda (_button)
+										  (when (file-exists-p ,current-file)
+											(find-file ,current-file)))
+							   'other-window-action `(lambda (_button)
+													   (when (file-exists-p ,current-file)
+														 (find-file-other-window ,current-file)
+														 (other-window 1)))
+							   'follow-link t
+							   'file-path current-file
+							   'help-echo (format "Click/RET: open | o: other window | %s" current-file))
+
+				  ;; 获取并显示该文件的所有 overlays
+				  (let ((overlays (rich-text-db-query 'ov [beg end props] `(= id ,current-file))))
+					(dolist (ov overlays)
+					  (let* ((beg (nth 0 ov))
+							 (end (nth 1 ov))
+							 (props-str (nth 2 ov))
+							 (style-name (condition-case nil
+											 (read props-str)
+										   (error 'unknown)))
+							 (ov-start (point))
+							 (current-beg beg)
+							 (current-end end))
+						;; 插入 overlay 信息（可点击）
+						(insert (format "    ├─ [%s] at %d-%d\n"
+										style-name current-beg current-end))
+						;; 为 overlay 行创建按钮
+						(make-button ov-start (1- (point))
+									 'action `(lambda (_button)
+												(when (file-exists-p ,current-file)
+												  (find-file ,current-file)
+												  (goto-char ,current-beg)
+												  (pulse-momentary-highlight-region
+												   ,current-beg ,current-end)))
+									 'other-window-action `(lambda (_button)
+															 (when (file-exists-p ,current-file)
+															   (let ((target-buf (find-file-noselect ,current-file)))
+																 (display-buffer target-buf)
+																 (with-current-buffer target-buf
+																   (goto-char ,current-beg)
+																   (pulse-momentary-highlight-region
+																	,current-beg ,current-end))
+																 ;; 确保光标回到列表窗口
+																 (select-window (get-buffer-window "*Rich-Text Files*")))))
+									 'follow-link t
+									 'file-path current-file
+									 'beg current-beg
+									 'end current-end
+									 'help-echo (format "Click/RET: jump | o: other window | pos %d in %s"
+														current-beg
+														(file-name-nondirectory current-file))))))
+				  (insert "\n")))
+			  (goto-char (point-min))
+			  (rich-text-files-mode)))
+		  (pop-to-buffer "*Rich-Text Files*")
+		  (message "Found %d file%s with rich-text overlays (RET: jump | o: other window | q: quit)"
 				   (length files)
 				   (if (= (length files) 1) "" "s")))
 	  (message "No files with rich-text overlays in database"))))
+
+;; 定义专门的 mode 来处理按键
+(define-derived-mode rich-text-files-mode special-mode "RT-Files"
+  "Major mode for Rich-Text Files list buffer.
+\\{rich-text-files-mode-map}"
+  (setq buffer-read-only t))
+
+(define-key rich-text-files-mode-map (kbd "o") 'rich-text-files-open-other-window)
+(define-key rich-text-files-mode-map (kbd "RET") 'push-button)
+
+(defun rich-text-files-open-other-window ()
+  "Open the file or jump to overlay at point in other window, keeping focus here."
+  (interactive)
+  (let ((button (button-at (point))))
+	(when button
+	  (let ((action (button-get button 'other-window-action)))
+		(when action
+		  (funcall action button))))))
 
 ;;;###autoload
 (defun rich-text-db-clear-file (file-id)
@@ -143,27 +228,37 @@ FILE-ID is the file path."
 
 ;;;###autoload
 (defun rich-text-db-statistics ()
-  "Show statistics about rich-text database."
+  "Show statistics about rich-text database with clickable file links."
   (interactive)
   (let* ((total-overlays (rich-text-db-query-count 'ov))
 		 (files (mapcar #'car (rich-text-db-distinct-query 'ov [id])))
 		 (file-count (length files)))
 	(with-current-buffer (get-buffer-create "*Rich-Text Statistics*")
-	  (erase-buffer)
-	  (insert "Rich-Text Database Statistics\n")
-	  (insert "==============================\n\n")
-	  (insert (format "Total overlays: %d\n" total-overlays))
-	  (insert (format "Total files: %d\n\n" file-count))
-	  (when files
-		(insert "Overlays per file:\n")
-		(dolist (file files)
-		  (let ((count (rich-text-db-query-count 'ov `(= id ,file))))
-			(insert (format "  %s: %d\n"
-							(file-name-nondirectory file)
-							count)))))
-	  (goto-char (point-min))
-	  (special-mode))
-	(display-buffer "*Rich-Text Statistics*")))
+	  (let ((inhibit-read-only t))
+		(erase-buffer)
+		(insert "Rich-Text Database Statistics\n")
+		(insert "==============================\n\n")
+		(insert (format "Total overlays: %d\n" total-overlays))
+		(insert (format "Total files: %d\n\n" file-count))
+		(when files
+		  (insert "Overlays per file (click to open):\n")
+		  (dolist (file files)
+			(let* ((current-file file)  ; 捕获当前文件
+				   (count (rich-text-db-query-count 'ov `(= id ,current-file)))
+				   (line-start (point)))
+			  (insert (format "  %s: %d\n"
+							  (file-name-nondirectory current-file)
+							  count))
+			  ;; 为每个文件名创建按钮 - 使用反引号捕获值
+			  (make-button line-start (1- (point))
+						   'action `(lambda (_button)
+									  (when (file-exists-p ,current-file)
+										(find-file ,current-file)))
+						   'follow-link t
+						   'help-echo (format "Click to open: %s" current-file)))))
+		(goto-char (point-min))
+		(special-mode)))
+	(pop-to-buffer "*Rich-Text Statistics*")))
 
 ;;;###autoload
 (defun rich-text-db-vacuum ()
