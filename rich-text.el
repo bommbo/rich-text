@@ -110,6 +110,17 @@ Maps style-name (symbol) to a plist with :key, :props-fn, :light-fn, :dark-fn.")
   "Check if current display supports graphic (GUI)."
   (display-graphic-p))
 
+;;; ✓ 新增：获取光标下单词范围
+(defun rich-text--word-bounds ()
+  "Return (beg . end) of word at point.
+If no word at point, return (point . point)."
+  (if (or (looking-at "\\sw") (looking-back "\\sw" 1))
+      (let ((bounds (bounds-of-thing-at-point 'word)))
+        (if bounds
+            (cons (car bounds) (cdr bounds))
+          (cons (point) (point))))
+    (cons (point) (point))))
+
 ;;;; Define rich text face
 
 (defun keys-of-command (command keymap)
@@ -278,15 +289,51 @@ Returns the appropriate props by calling the registered functions."
         (funcall props-fn))
        (t nil)))))
 
+;;;; Conflict resolution for face-based styles
+
+(defun rich-text-clear-conflicting-styles (beg end style-name)
+  "Clear styles that conflict with STYLE-NAME in region [BEG, END).
+Conflicting groups:
+- Highlight: my, mg, mb, mr
+- Font color: fontcolor
+- Bold: bold
+- Italic: italic
+- Underline: underline-line, underline-wave"
+  (let ((conflict-groups
+         '((highlight my mg mb mr)
+           (color fontcolor)
+           (bold bold)
+           (italic italic)
+           (underline underline-line underline-wave))))
+    (dolist (group conflict-groups)
+      (when (memq style-name (cdr group))
+        (dolist (ov (overlays-in beg end))
+          (let ((ov-style (overlay-get ov 'rich-text)))
+            (when (and (memq ov-style (cdr group))
+                       (not (eq ov-style style-name)))
+              ;; 删除 overlay
+              (delete-overlay ov)
+              ;; 从数据库删除
+              (let ((id (rich-text-buffer-or-file-id)))
+                (when id
+                  (rich-text-delete-ov-from-db id (overlay-start ov) (overlay-end ov) ov-style))))))))))
+
+;;;; ✓ 应用样式到单词（唯一定义）
 (defun rich-text-apply-style (style-name)
-  "Apply STYLE-NAME to region or line.
-This is the unified function for all rich-text styles."
+  "Apply STYLE-NAME to region or current word.
+Clears conflicting styles before applying."
   (let ((props (rich-text-get-props style-name)))
     (if props
         (let (ov)
           (if (use-region-p)
-              (setq ov (ov-set (ov-region) props))
-            (setq ov (ov-set (ov-line) props)))
+              (progn
+                (rich-text-clear-conflicting-styles (region-beginning) (region-end) style-name)
+                (setq ov (ov-set (ov-region) props)))
+            (let* ((bounds (rich-text--word-bounds))
+                   (beg (car bounds))
+                   (end (cdr bounds)))
+              (rich-text-clear-conflicting-styles beg end style-name)
+              (setq ov (ov-set (ov beg end) props))))
           ;; 设置 overlay 属性
           (setq ov (ov-set ov 'evaporate t))
           (setq ov (ov-set ov `(rich-text ,style-name)))
@@ -398,7 +445,7 @@ ov-spec format: (beg end buffer props)"
 
 ;;;###autoload
 (defun rich-text-restore-buffer-ov ()
-  "Restore overlays from database for current buffer."
+  "Restore overlays from database for current buffer, with full face props and font check."
   (interactive)
   (when-let* ((id (rich-text-buffer-or-file-id))
               (_ (rich-text-buffer-stored-p id))
@@ -409,50 +456,67 @@ ov-spec format: (beg end buffer props)"
         (let* ((beg (nth 0 spec))
                (end (nth 1 spec))
                (stored-data (nth 2 spec))
-               style-name
-               props)
+               style-name props)
           ;; 解析存储的样式名称
           (condition-case nil
               (setq style-name (read stored-data))
             (error nil))
-          
-          ;; 获取当前环境的 props
+
+          ;; 获取完整属性
           (when (and (symbolp style-name)
                      (setq props (rich-text-get-props style-name)))
+            ;; 确保 face 存在
+            (unless (plist-get props 'face)
+              (plist-put props 'face '()))
+
+            ;; 检查字体是否存在
+            (when-let ((family (plist-get (plist-get props 'face) :family)))
+              (unless (member family (font-family-list))
+                (message "Font '%s' not found! Using fallback." family)))
+
+            ;; 创建 overlay
             (let ((ov (ov beg end props)))
               (ov-set ov 'rich-text style-name)
               (ov-set ov 'evaporate t)
-              ;; 检查是否需要主题切换支持
+              ;; 保留 DWIM 对主题切换支持
               (when-let ((style-info (gethash style-name rich-text-style-registry)))
                 (when (or (plist-get style-info :light-fn)
                           (plist-get style-info :dark-fn))
-                  (ov-set ov 'reverse-p t)))
-              (setq count (1+ count))))))
+                  (ov-set ov 'reverse-p t))))
+            (setq count (1+ count)))))
       (when (> count 0)
-        (message "%s rich-text overlay%s restored!" 
+        (message "%s rich-text overlay%s restored with face!" 
                  count (if (= count 1) "" "s"))))))
 
-;;;; ✓ 改进：清除样式命令（精准删除）
+
+;;;; ✓ 精简的清除样式命令
 
 ;;;###autoload
-(defun rich-text-clear-region (beg end &optional no-sync)
-  "Clear all rich-text overlays in region from BEG to END."
-  (interactive "r")
-  (let ((id (rich-text-buffer-or-file-id))
-        (count 0))
-    (dolist (ov (overlays-in beg end))
-      (when (overlay-get ov 'rich-text)
-        (let ((ov-beg (overlay-start ov))
-              (ov-end (overlay-end ov))
-              (style-name (overlay-get ov 'rich-text)))
-          (delete-overlay ov)
-          (setq count (1+ count))
-          (unless no-sync
-            (rich-text-delete-ov-from-db id ov-beg ov-end style-name)))))
-    (message "Cleared %d rich-text overlay%s in region%s" 
-             count 
-             (if (= count 1) "" "s")
-             (if no-sync "" " (synced to DB)"))))
+(defun rich-text-clear-at-point (&optional no-sync)
+  "Clear all rich-text overlays at point."
+  (interactive)
+  (let ((cleared nil)
+        (id (rich-text-buffer-or-file-id))
+        (overlays-to-delete '()))
+    (dolist (ov (overlays-at (point)))
+      (let ((rich-text-val (overlay-get ov 'rich-text)))
+        (when rich-text-val
+          (let ((beg (overlay-start ov))
+                (end (overlay-end ov))
+                (style-name rich-text-val))
+            (push (list beg end style-name) overlays-to-delete)
+            (delete-overlay ov)
+            (setq cleared t)))))
+    (unless no-sync
+      (dolist (record overlays-to-delete)
+        (let ((beg (nth 0 record))
+              (end (nth 1 record))
+              (style-name (nth 2 record)))
+          (rich-text-delete-ov-from-db id beg end style-name))))
+    (if cleared
+        (message "Cleared overlay at point%s"
+                 (if no-sync "" " (synced to DB)"))
+      (message "No overlay at point"))))
 
 ;;;###autoload
 (defun rich-text-clear-buffer (&optional no-sync)
@@ -473,49 +537,31 @@ ov-spec format: (beg end buffer props)"
              (if no-sync "" " (synced to DB)"))))
 
 ;;;###autoload
-(defun rich-text-clear-at-point (&optional no-sync)
-  "Clear rich-text overlay at point."
-  (interactive)
-  (let ((cleared nil)
-        (id (rich-text-buffer-or-file-id)))
-    (dolist (ov (overlays-at (point)))
-      (when (overlay-get ov 'rich-text)
-        (let ((beg (overlay-start ov))
-              (end (overlay-end ov))
-              (style-name (overlay-get ov 'rich-text)))
-          (delete-overlay ov)
-          (setq cleared t)
-          (unless no-sync
-            (rich-text-delete-ov-from-db id beg end style-name)))))
-    (if cleared
-        (message "Cleared rich-text overlay at point%s"
-                 (if no-sync "" " (synced to DB)"))
-      (message "No rich-text overlay at point"))))
-
-;;;###autoload
-(defun rich-text-clear-all-buffers (&optional no-sync)
-  "Clear all rich-text overlays in all buffers."
-  (interactive)
-  (let ((total-count 0)
-        (file-ids '()))
-    (dolist (buffer (buffer-list))
-      (with-current-buffer buffer
-        (let ((count 0)
-              (id (rich-text-buffer-or-file-id)))
-          (dolist (ov (overlays-in (point-min) (point-max)))
-            (when (overlay-get ov 'rich-text)
-              (delete-overlay ov)
-              (setq count (1+ count))))
-          (setq total-count (+ total-count count))
-          (when (and id (> count 0))
-            (push id file-ids)))))
-    (unless no-sync
-      (dolist (id file-ids)
-        (rich-text-db-delete 'ov `(= id ,id))))
-    (message "Cleared %d rich-text overlay%s in all buffers%s" 
-             total-count 
-             (if (= total-count 1) "" "s")
-             (if no-sync "" " (synced to DB)"))))
+(defun rich-text-clear-file (&optional no-sync)
+  "Clear all rich-text overlays for a file selected from marked files."
+  (interactive "P")
+  (let* ((all-files (mapcar #'car (rich-text-db-distinct-query 'ov [id])))
+         (file (if all-files
+                   (completing-read "Clear styles for file: " all-files nil t)
+                 (user-error "No files with rich-text styles found"))))
+    (when (file-exists-p file)
+      (let ((count 0))
+        ;; 清理所有打开的 buffer 中该文件的 overlays
+        (dolist (buf (buffer-list))
+          (with-current-buffer buf
+            (when (equal (buffer-file-name) file)
+              (dolist (ov (overlays-in (point-min) (point-max)))
+                (when (overlay-get ov 'rich-text)
+                  (delete-overlay ov)
+                  (setq count (1+ count)))))))
+        ;; 从数据库删除
+        (unless no-sync
+          (rich-text-db-delete 'ov `(= id ,file)))
+        (message "Cleared %d rich-text overlay%s for file %s%s" 
+                 count 
+                 (if (= count 1) "" "s")
+                 (file-name-nondirectory file)
+                 (if no-sync "" " (synced to DB)"))))))
 
 ;;;###autoload
 (defun rich-text-list-overlays ()
