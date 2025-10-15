@@ -225,18 +225,30 @@
 	  (let ((buf (get-file-buffer file)))
 		(when buf
 		  (with-current-buffer buf
-			(if (string-prefix-p "SCALE:" raw-props)
-				(rich-text--rebuild-scale-overlays file beg end)
-			  (let ((target-symbol
-					 (condition-case nil
-						 (read raw-props)
-					   (error nil))))
+			(cond
+			 ;; SCALE 样式：重建区域（已包含刷新）
+			 ((string-prefix-p "SCALE:" raw-props)
+			  (rich-text--rebuild-scale-overlays file beg end))
+			 ;; FONT 样式：字符串匹配 + 强制刷新
+			 ((string-prefix-p "FONT:" raw-props)
+			  (let ((deleted nil))
 				(dolist (ov (overlays-in beg end))
-				  ;; 关键：精确匹配范围 + 样式
+				  (when (and (stringp (overlay-get ov 'rich-text))
+							 (string= (overlay-get ov 'rich-text) raw-props)
+							 (= (overlay-start ov) beg)
+							 (= (overlay-end ov) end))
+					(delete-overlay ov)
+					(setq deleted t)))
+				(when deleted
+				  (redisplay t))))
+			 ;; 内置样式：符号匹配
+			 (t
+			  (let ((target-symbol (condition-case nil (read raw-props) (error nil))))
+				(dolist (ov (overlays-in beg end))
 				  (when (and (eq (overlay-get ov 'rich-text) target-symbol)
 							 (= (overlay-start ov) beg)
 							 (= (overlay-end ov) end))
-					(delete-overlay ov))))))))
+					(delete-overlay ov)))))))))
 	  ;; 3. 刷新列表
 	  (switch-to-buffer list-buf)
 	  (rich-text-tabulated-refresh)
