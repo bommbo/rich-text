@@ -153,8 +153,43 @@
 						file-id (car range) (cdr range)))
 					 regions)))))))
 
+;; ┌──────────────────────────────────────────────────────────────┐
+;; │  4. 动态注册自定义样式，使其能被 rich-text 正确恢复         │
+;; └──────────────────────────────────────────────────────────────┘
+
+(defun rich-text-plus--get-font-props (style-name)
+  "Get face props for FONT:... styles."
+  (when (string-prefix-p "FONT:" (symbol-name style-name))
+	(let ((font-name (substring (symbol-name style-name) 5)))
+	  (when (member font-name (font-family-list))
+		`(face (:family ,font-name))))))
+
+(defun rich-text-plus--restore-font-overlays ()
+  "Restore FONT:... overlays from database."
+  (when (buffer-file-name)
+	(let ((file-id (buffer-file-name)))
+	  (let ((font-records (rich-text-db-query 'ov [beg end props]
+											  `(and (= id ,file-id)
+													(like props "FONT:%")))))
+		(dolist (row font-records)
+		  (let* ((beg (nth 0 row))
+				 (end (nth 1 row))
+				 (props (nth 2 row))
+				 (font-name (substring props 5)))
+			(when (member font-name (font-family-list))
+			  (let ((ov (make-overlay beg end)))
+				(overlay-put ov 'face `(:family ,font-name))
+				(overlay-put ov 'rich-text props)
+				(overlay-put ov 'evaporate t)))))))))
+
 ;; 集成到 hook
 (with-eval-after-load 'rich-text
+  (advice-add 'rich-text-get-props :around
+	(lambda (orig-fn style-name &rest args)
+	  (or (rich-text-plus--get-font-props style-name)
+		  (apply orig-fn style-name args))))
+
+  (add-hook 'find-file-hook #'rich-text-plus--restore-font-overlays)
   (add-hook 'find-file-hook #'rich-text-plus-restore-all-scales))
 
 (provide 'rich-text-plus)
