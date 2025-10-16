@@ -403,22 +403,29 @@ ov-spec format: (beg end buffer props)"
   (when-let* ((beg (nth 0 ov-spec))
               (end (nth 1 ov-spec))
               (id (rich-text-buffer-or-file-id (nth 2 ov-spec))))
-    ;; 查询是否已存在相同位置和样式的记录
+	
     (let ((old (car (rich-text-db-crud
                      `[:select rowid :from ov
                        :where (and (= id ,id) (= beg ,beg) (= end ,end) 
                                    (= props ,(prin1-to-string style-name)))]))))
       (unless old
-        ;; 只插入新记录（不更新，允许同一位置有多个不同样式）
         (rich-text-db-insert
          'ov `([,id ,beg ,end ,(prin1-to-string style-name)]))))))
 
 (defun rich-text-delete-ov-from-db (id beg end style-name)
-  "Delete specific overlay record from database."
-  (rich-text-db-crud
-   `[:delete :from ov
-     :where (and (= id ,id) (= beg ,beg) (= end ,end) 
-                 (= props ,(prin1-to-string style-name)))]))
+  "Delete overlay record from database safely (string-compatible)."
+  (let* ((id-str (format "%s" id))
+         (props-str (format "%s" style-name)))
+    (message "Deleting from DB: id=%s beg=%s end=%s props=%s"
+             id-str beg end props-str)
+    (rich-text-db-crud
+     `[:delete :from ov
+       :where (and (= id ,id-str)
+                   (= beg ,beg)
+                   (= end ,end)
+                   (= props ,props-str))])))
+
+
 
 (defun rich-text-buffer-ov-specs ()
   "Get all rich-text overlay specs in current buffer."
