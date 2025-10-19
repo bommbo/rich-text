@@ -88,6 +88,7 @@
 	(message "%s" msg)
 	;; Also copy to kill ring for easy reference
 	(kill-new msg)
+	(sit-for 2)
 	;; Return the message so it can be used programmatically
 	msg))
 
@@ -105,8 +106,8 @@
 			(count 0))
 		(dolist (ov (overlays-in (point-min) (point-max)))
 		  (when (eq (overlay-get ov 'rich-text) style-name)
-			(setq count (+ count (- (overlay-end ov) (overlay-start ov)))))))
-		(push (cons cat count) cat-counts)))
+			(setq count (+ count (- (overlay-end ov) (overlay-start ov))))))
+		(push (cons cat count) cat-counts)))  ; ← 修复：在 let 内部
 
 	;; Create report buffer
 	(with-current-buffer (get-buffer-create "*Category Report*")
@@ -136,7 +137,7 @@
 		(goto-char (point-min))
 		(special-mode)))
 
-	(pop-to-buffer "*Category Report*"))
+	(pop-to-buffer "*Category Report*")))
 
 ;;;; Auto-apply category on input
 
@@ -269,18 +270,17 @@
 		(when-let* ((rt (overlay-get ov 'rich-text))
 					(name (symbol-name rt)))
 		  (when (string-prefix-p "category-" name)
-			(delete-overlay ov)
-			(when id
-			  (rich-text-delete-ov-from-db id
-										  (overlay-start ov)
-										  (overlay-end ov)
-										  rt)))))
+			(let ((ov-beg (overlay-start ov))
+				  (ov-end (overlay-end ov)))
+			  (delete-overlay ov)
+			  (when id
+				(rich-text-delete-ov-from-db id ov-beg ov-end rt))))))
 
-	  ;; Apply new category
+	  ;; Apply new category (if not "0")
 	  (unless (string= category "0")
 		(let ((props (rich-text-get-props style-name)))
-		  (when (and props (< beg end))  ; ← 范围检查
-			(let ((ov (ov beg end props)))  ; ← 使用 ov
+		  (when (and props (< beg end))
+			(let ((ov (ov beg end props)))
 			  (ov-set ov 'rich-text style-name)
 			  (ov-set ov 'evaporate t)
 			  (rich-text-store-ov style-name
