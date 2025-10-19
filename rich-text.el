@@ -415,7 +415,7 @@ ov-spec format: (beg end buffer props)"
 (defun rich-text-delete-ov-from-db (id beg end style-name)
   "Delete overlay record from database safely (string-compatible)."
   (let* ((id-str (format "%s" id))
-         (props-str (format "%s" style-name)))
+         (props-str (prin1-to-string style-name)))
     (message "Deleting from DB: id=%s beg=%s end=%s props=%s"
              id-str beg end props-str)
     (rich-text-db-crud
@@ -424,8 +424,6 @@ ov-spec format: (beg end buffer props)"
                    (= beg ,beg)
                    (= end ,end)
                    (= props ,props-str))])))
-
-
 
 (defun rich-text-buffer-ov-specs ()
   "Get all rich-text overlay specs in current buffer."

@@ -436,24 +436,29 @@ If TIMESTAMP is nil, restores the most recent stash."
 	  (user-error "No stashed text found for category %s" category))
 
 	;; Insert text back into buffer
-	(save-excursion
-	  (dolist (item stashed-items)
-		(let ((position (nth 0 item))
-			  (text (nth 1 item)))
-		  ;; Find safe insertion point (don't exceed buffer bounds)
-		  (goto-char (min position (point-max)))
-		  (insert text)
-		  (setq count (+ count (length text)))
+(save-excursion
+  (let ((old-category rich-text-category-current))
+	(unwind-protect
+		(progn
+		  (setq rich-text-category-current "0")
+		  (dolist (item stashed-items)
+			(let ((position (nth 0 item))
+				  (text (nth 1 item)))
+			  (goto-char (min position (point-max)))
+			  (insert text)
+			  (setq count (+ count (length text)))
 
-		  ;; Apply category style
-		  (when (and props (< (- (point) (length text)) (point)))
-			(let ((start (- (point) (length text)))
-				  (end (point)))
-			  (let ((ov (ov start end props)))  ; ← 使用 ov
-				(ov-set ov 'rich-text style-name)
-				(ov-set ov 'evaporate t)
-				(rich-text-store-ov style-name
-								   (list start end (current-buffer) props))))))))
+			  ;; Apply category style manually
+			  (when (and props (< (- (point) (length text)) (point)))
+				(let ((start (- (point) (length text)))
+					  (end (point)))
+				  (let ((ov (ov start end props)))
+					(ov-set ov 'rich-text style-name)
+					(ov-set ov 'evaporate t)
+					(rich-text-store-ov style-name
+									   (list start end (current-buffer) props)))))))
+	  ;; restore original category
+	  (setq rich-text-category-current old-category))))
 
 	;; Remove from stash database
 	(rich-text-db-crud
@@ -465,7 +470,7 @@ If TIMESTAMP is nil, restores the most recent stash."
 	(message "Restored %d character%s from category %s stash"
 			 count
 			 (if (= count 1) "" "s")
-			 category)))
+			 category))))
 
 ;;;###autoload
 (defun rich-text-category-list-stashes ()
