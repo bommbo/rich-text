@@ -1,11 +1,9 @@
-;;; rich-text-categories.el --- Category-based text management in rich-text -*- lexical-binding: t -*-
-
-;; Integrate text-categories functionality into rich-text system
-;; Use overlay + database instead of text-property + file
+;;; rich-text-categories.el --- Category-based text management -*- lexical-binding: t -*-
 
 (require 'rich-text)
 (require 'rich-text-db)
 (require 'ov)
+(require 'tabulated-list)
 
 ;;;; Variables
 
@@ -84,12 +82,9 @@
 					  (if all-cats
 						  (mapconcat #'identity all-cats ", ")
 						"none"))))
-	;; Display in minibuffer and echo area
 	(message "%s" msg)
-	;; Also copy to kill ring for easy reference
 	(kill-new msg)
 	(sit-for 2)
-	;; Return the message so it can be used programmatically
 	msg))
 
 ;;;###autoload
@@ -100,16 +95,14 @@
 		 (hidden-cats (mapcar #'car rich-text-category-hidden-overlays))
 		 (cat-counts '()))
 
-	;; Count characters in each category
 	(dolist (cat all-cats)
 	  (let ((style-name (intern (format "category-%s" cat)))
 			(count 0))
 		(dolist (ov (overlays-in (point-min) (point-max)))
 		  (when (eq (overlay-get ov 'rich-text) style-name)
 			(setq count (+ count (- (overlay-end ov) (overlay-start ov))))))
-		(push (cons cat count) cat-counts)))  ; ← 修复：在 let 内部
+		(push (cons cat count) cat-counts)))
 
-	;; Create report buffer
 	(with-current-buffer (get-buffer-create "*Category Report*")
 	  (let ((inhibit-read-only t))
 		(erase-buffer)
@@ -155,11 +148,11 @@
 		  (ov-set ov 'evaporate t)
 		  (rich-text-store-ov style-name (list beg end (current-buffer) props)))))))
 
-;;;; Delete category
+;;;; Delete category — TRUE DELETE
 
 ;;;###autoload
 (defun rich-text-category-delete (category)
-  "Delete all text belonging to CATEGORY."
+  "Delete all text and overlays belonging to CATEGORY."
   (interactive
    (list (completing-read "Delete category: "
 						  (rich-text-category-get-all)
@@ -168,14 +161,12 @@
 		(count 0)
 		(id (rich-text-buffer-or-file-id)))
 
-	;; Step 1: Collect all regions to delete
 	(let ((regions '()))
 	  (dolist (ov (overlays-in (point-min) (point-max)))
 		(when (eq (overlay-get ov 'rich-text) style-name)
 		  (push (cons (overlay-start ov) (overlay-end ov)) regions)
 		  (delete-overlay ov)))
 
-	  ;; Step 2: Delete from back to front to avoid position shifts
 	  (setq regions (sort regions (lambda (a b) (> (car a) (car b)))))
 	  (dolist (region regions)
 		(let ((start (car region))
@@ -183,7 +174,6 @@
 		  (delete-region start end)
 		  (setq count (+ count (- end start))))))
 
-	;; Step 3: Delete from database
 	(when id
 	  (rich-text-db-crud
 	   `[:delete :from ov
@@ -208,7 +198,6 @@
 		   (categories '())
 		   new-category)
 
-	  ;; Collect all categories on current line
 	  (dolist (ov overlays)
 		(when-let* ((rt (overlay-get ov 'rich-text))
 					(name (symbol-name rt)))
@@ -217,38 +206,33 @@
 			  (unless (member cat categories)
 				(push cat categories))))))
 
-	  ;; Determine new category
 	  (setq new-category
 			(cond
-			 ;; Multiple categories: unify to first default
 			 ((> (length categories) 1)
 			  (car rich-text-category-default-cycle))
-			 ;; Single category: switch to next
 			 ((= (length categories) 1)
-			  (or (cadr (member current rich-text-category-default-cycle))
-				  (car rich-text-category-default-cycle))))
-			 ;; No category: use first default
+			  (let ((current (car categories)))
+				(or (cadr (member current rich-text-category-default-cycle))
+					(car rich-text-category-default-cycle))))
 			 (t (car rich-text-category-default-cycle))))
 
-	  ;; Remove all category styles on this line
 	  (dolist (ov overlays)
 		(when-let* ((rt (overlay-get ov 'rich-text))
 					(name (symbol-name rt)))
 		  (when (string-prefix-p "category-" name)
 			(delete-overlay ov))))
 
-	  ;; Apply new category
 	  (unless (string= new-category "0")
 		(let* ((style-name (intern (format "category-%s" new-category)))
 			   (props (rich-text-get-props style-name)))
-		  (when (and props (< line-start line-end))  ; ← 范围检查
-			(let ((ov (ov line-start line-end props)))  ; ← 使用 ov
+		  (when (and props (< line-start line-end))
+			(let ((ov (ov line-start line-end props)))
 			  (ov-set ov 'rich-text style-name)
 			  (ov-set ov 'evaporate t)
 			  (rich-text-store-ov style-name
-								 (list line-start line-end (current-buffer) props)))))))
+								 (list line-start line-end (current-buffer) props))))))
 
-	  (message "Line category changed to: %s" new-category))
+	  (message "Line category changed to: %s" new-category))))
 
 ;;;; Region category change
 
@@ -265,7 +249,6 @@
 		   (style-name (intern (format "category-%s" category)))
 		   (id (rich-text-buffer-or-file-id)))
 
-	  ;; Remove all category style overlays in region
 	  (dolist (ov (overlays-in beg end))
 		(when-let* ((rt (overlay-get ov 'rich-text))
 					(name (symbol-name rt)))
@@ -276,7 +259,6 @@
 			  (when id
 				(rich-text-delete-ov-from-db id ov-beg ov-end rt))))))
 
-	  ;; Apply new category (if not "0")
 	  (unless (string= category "0")
 		(let ((props (rich-text-get-props style-name)))
 		  (when (and props (< beg end))
@@ -289,67 +271,42 @@
 	  (deactivate-mark)
 	  (message "Region category set to: %s" category))))
 
-;;;; Persistence
+;;;###autoload
+(defun rich-text-category-apply-1 ()
+  "Apply Category 1 to current word or active region."
+  (interactive)
+  (let* ((bounds (if (use-region-p)
+					 (cons (region-beginning) (region-end))
+				   (rich-text--word-bounds)))
+		 (beg (car bounds))
+		 (end (cdr bounds))
+		 (category "1")
+		 (style-name (intern (format "category-%s" category)))
+		 (id (rich-text-buffer-or-file-id)))
 
-(defvar-local rich-text-category-hidden-overlays '()
-  "Alist of hidden category overlays: ((category . (ov-data...)) ...).")
+	(dolist (ov (overlays-in beg end))
+	  (when-let* ((rt (overlay-get ov 'rich-text))
+				  (name (symbol-name rt)))
+		(when (string-prefix-p "category-" name)
+		  (delete-overlay ov)
+		  (when id
+			(rich-text-delete-ov-from-db id (overlay-start ov) (overlay-end ov) rt)))))
 
-(defvar-local rich-text-category-stashed-text '()
-  "Alist of stashed category text: ((category timestamp . text-data) ...).")
+	(let ((props (rich-text-get-props style-name)))
+	  (when (and props (< beg end))
+		(let ((ov (ov beg end props)))
+		  (ov-set ov 'rich-text style-name)
+		  (ov-set ov 'evaporate t)
+		  (rich-text-store-ov style-name (list beg end (current-buffer) props)))))
 
-(defun rich-text-category-ensure-meta-table ()
-  "Ensure meta table exists in database."
-  (condition-case err
-	  (rich-text-db-crud
-	   [:create-table :if-not-exists meta [id key value]])
-	(error
-	 (message "Warning: Could not create meta table: %S" err))))
+	(deactivate-mark)
+	(message "Applied Category 1 to %d-%d" beg end)))
 
-(defun rich-text-category-ensure-stash-table ()
-  "Ensure stash table exists in database."
-  (condition-case err
-	  (rich-text-db-crud
-	   [:create-table :if-not-exists stash [id category timestamp position text]])
-	(error
-	 (message "Warning: Could not create stash table: %S" err))))
-
-(defun rich-text-category-save-current ()
-  "Save current category setting to database."
-  (when-let ((id (rich-text-buffer-or-file-id)))
-	(rich-text-category-ensure-meta-table)
-	(condition-case err
-		(progn
-		  (ignore-errors
-			(rich-text-db-crud
-			 `[:delete :from meta
-			   :where (and (= id ,id) (= key "current-category"))]))
-		  (rich-text-db-insert 'meta
-							  `([,id "current-category" ,rich-text-category-current])))
-	  (error
-	   (message "Warning: Could not save current category: %S" err)))))
-
-(defun rich-text-category-restore-current ()
-  "Restore current category setting from database."
-  (when-let ((id (rich-text-buffer-or-file-id)))
-	(condition-case err
-		(progn
-		  (rich-text-category-ensure-meta-table)
-		  (when-let ((result (car (rich-text-db-crud
-								  `[:select value :from meta
-									:where (and (= id ,id)
-												(= key "current-category"))]))))
-			(setq rich-text-category-current (car result))
-			(force-mode-line-update)
-			(message "Restored category: %s" rich-text-category-current)))
-	  (error
-	   (message "Warning: Could not restore category: %S" err)))))
-
-;;;; Stash/Unstash categories (backup and restore)
+;;;; Stash/Unstash — GENERIC, NO SNAPSHOT
 
 ;;;###autoload
 (defun rich-text-category-stash (category)
-  "Stash (backup) all text in CATEGORY to database, then delete from buffer.
-The text can be restored later with unstash, even after closing the file."
+  "Stash (backup) all text in CATEGORY to database, then delete from buffer."
   (interactive
    (list (completing-read "Stash category: "
 						  (rich-text-category-get-all)
@@ -363,22 +320,27 @@ The text can be restored later with unstash, even after closing the file."
 	(unless id
 	  (user-error "Buffer has no associated file"))
 
-	;; Ensure stash table exists
 	(rich-text-category-ensure-stash-table)
 
-	;; Collect all text in this category
 	(dolist (ov (overlays-in (point-min) (point-max)))
 	  (when (eq (overlay-get ov 'rich-text) style-name)
 		(let* ((start (overlay-start ov))
 			   (end (overlay-end ov))
 			   (text (buffer-substring-no-properties start end)))
 		  (push (list start end text) stashed-items)
-		  (setq count (+ count (length text))))))
+		  (setq count (+ count (length text)))
+		  (delete-overlay ov))))  ; ← 删除 overlay
 
 	(when (null stashed-items)
 	  (user-error "No text found in category %s" category))
 
-	;; Save to database with error handling
+	;; Delete text from buffer (critical)
+	(let ((regions (mapcar (lambda (item) (cons (nth 0 item) (nth 1 item))) stashed-items)))
+	  (setq regions (sort regions (lambda (a b) (> (car a) (car b)))))
+	  (dolist (reg regions)
+		(delete-region (car reg) (cdr reg))))
+
+	;; Save to DB
 	(condition-case err
 		(dolist (item (reverse stashed-items))
 		  (let ((position (nth 0 item))
@@ -388,9 +350,6 @@ The text can be restored later with unstash, even after closing the file."
 	  (error
 	   (user-error "Failed to save stash: %S" err)))
 
-	;; Now delete from buffer
-	(rich-text-category-delete category)
-
 	(message "Stashed %d character%s from category %s (timestamp: %s)"
 			 count
 			 (if (= count 1) "" "s")
@@ -399,16 +358,15 @@ The text can be restored later with unstash, even after closing the file."
 
 ;;;###autoload
 (defun rich-text-category-unstash (category &optional timestamp)
-  "Restore stashed text for CATEGORY from database.
-If TIMESTAMP is nil, restores the most recent stash."
+  "Restore stashed text for CATEGORY from database and remove the record."
   (interactive
    (let* ((id (rich-text-buffer-or-file-id))
 		  (stashes (when id
-					(rich-text-db-crud
-					 `[:select [category timestamp]
-					   :from stash
-					   :where (= id ,id)
-					   :order-by [(desc timestamp)]]))))
+					 (rich-text-db-crud
+					  `[:select [category timestamp]
+						:from stash
+						:where (= id ,id)
+						:order-by [(desc timestamp)]]))))
 	 (unless stashes
 	   (user-error "No stashed categories found for this file"))
 	 (let* ((choices (mapcar (lambda (s)
@@ -421,98 +379,255 @@ If TIMESTAMP is nil, restores the most recent stash."
 	   (list cat ts))))
 
   (let* ((id (rich-text-buffer-or-file-id))
-		 (stashed-items (rich-text-db-crud
-						`[:select [position text]
-						  :from stash
-						  :where (and (= id ,id)
-									  (= category ,category)
-									  (= timestamp ,timestamp))
-						  :order-by [(asc position)]]))
+		 (stashed-items (when id
+						  (rich-text-db-crud
+						   `[:select [position text]
+							 :from stash
+							 :where (and (= id ,id)
+										 (= category ,category)
+										 (= timestamp ,timestamp))
+							 :order-by [(asc position)]])))
 		 (style-name (intern (format "category-%s" category)))
 		 (props (rich-text-get-props style-name))
 		 (count 0))
 
+	(unless id
+	  (user-error "Current buffer is not associated with a file"))
+
 	(unless stashed-items
-	  (user-error "No stashed text found for category %s" category))
+	  (user-error "No stashed text found for category %s at %s" category timestamp))
 
-	;; Insert text back into buffer
-(save-excursion
-  (let ((old-category rich-text-category-current))
-	(unwind-protect
-		(progn
-		  (setq rich-text-category-current "0")
-		  (dolist (item stashed-items)
-			(let ((position (nth 0 item))
-				  (text (nth 1 item)))
-			  (goto-char (min position (point-max)))
-			  (insert text)
-			  (setq count (+ count (length text)))
+	(save-excursion
+	  (let ((old-category rich-text-category-current))
+		(unwind-protect
+			(progn
+			  (setq rich-text-category-current "0")
+			  (dolist (item stashed-items)
+				(let ((position (nth 0 item))
+					  (text (nth 1 item)))
+				  (goto-char (min position (point-max)))
+				  (insert text)
+				  (setq count (+ count (length text)))
 
-			  ;; Apply category style manually
-			  (when (and props (< (- (point) (length text)) (point)))
-				(let ((start (- (point) (length text)))
-					  (end (point)))
-				  (let ((ov (ov start end props)))
-					(ov-set ov 'rich-text style-name)
-					(ov-set ov 'evaporate t)
-					(rich-text-store-ov style-name
-									   (list start end (current-buffer) props)))))))
-	  ;; restore original category
-	  (setq rich-text-category-current old-category))))
+				  (when (and props (< (- (point) (length text)) (point)))
+					(let ((start (- (point) (length text)))
+						  (end (point)))
+					  (let ((ov (ov start end props)))
+						(ov-set ov 'rich-text style-name)
+						(ov-set ov 'evaporate t)
+						(rich-text-store-ov style-name
+										   (list start end (current-buffer) props))))))))
+		  (setq rich-text-category-current old-category))))
 
-	;; Remove from stash database
+	;; ✅ ALWAYS remove the stash record — no exceptions
 	(rich-text-db-crud
 	 `[:delete :from stash
 	   :where (and (= id ,id)
 				   (= category ,category)
 				   (= timestamp ,timestamp))])
 
-	(message "Restored %d character%s from category %s stash"
-			 count
-			 (if (= count 1) "" "s")
-			 category))))
+	(message "✅ Restored and removed stash for category %s (%s)" category timestamp)))
+
+;;;; Tabulated List UI (stash only)
+
+(defvar-local rich-text-stash--file-id nil)
+
+(defvar rich-text-stash-list-mode-map
+  (let ((map (make-sparse-keymap)))
+	(set-keymap-parent map tabulated-list-mode-map)
+	(define-key map (kbd "RET") #'rich-text-stash-unstash-at-point)
+	(define-key map (kbd "u") #'rich-text-stash-unstash-at-point)
+	(define-key map (kbd "d") #'rich-text-stash-delete-at-point)
+	(define-key map (kbd "g") #'rich-text-category-list-stashes-tabulated)
+	map)
+  "Keymap for stash list mode.")
+
+(define-derived-mode rich-text-stash-list-mode tabulated-list-mode "Stash-List"
+  "Mode for listing stashed categories."
+  :keymap rich-text-stash-list-mode-map
+  (setq tabulated-list-format [("Category" 10 t) ("Timestamp" 20 t) ("Items" 10 t)])
+  (setq tabulated-list-padding 2))
 
 ;;;###autoload
-(defun rich-text-category-list-stashes ()
-  "List all stashed categories for current file."
+(defun rich-text-category-list-stashes-tabulated ()
+  "List all stashed categories using tabulated-list."
   (interactive)
   (let* ((id (rich-text-buffer-or-file-id))
 		 (stashes (when id
-				   (rich-text-db-crud
-					`[:select [category timestamp (funcall count text)]
-					  :from stash
-					  :where (= id ,id)
-					  :group-by [category timestamp]
-					  :order-by [(desc timestamp)]]))))
-
+					(rich-text-db-crud
+					 `[:select [category timestamp (funcall count text)]
+					   :from stash
+					   :where (= id ,id)
+					   :group-by [category timestamp]
+					   :order-by [(desc timestamp)]]))))
 	(if stashes
 		(with-current-buffer (get-buffer-create "*Category Stashes*")
-		  (let ((inhibit-read-only t))
-			(erase-buffer)
-			(insert "Stashed Categories\n")
-			(insert "==================\n\n")
-			(insert (format "File: %s\n\n" id))
-
-			(dolist (stash stashes)
-			  (let ((category (nth 0 stash))
-					(timestamp (nth 1 stash))
-					(items (nth 2 stash)))
-				(insert (format "Category %s - %s (%d item%s)\n"
-								category
-								timestamp
-								items
-								(if (= items 1) "" "s")))))
-
-			(insert "\nPress 'q' to close, 'u' to unstash")
-			(goto-char (point-min))
-			(special-mode)
-			(local-set-key (kbd "u") #'rich-text-category-unstash))
-		  (pop-to-buffer "*Category Stashes*"))
+		  (rich-text-stash-list-mode)
+		  (setq rich-text-stash--file-id id)
+		  (setq tabulated-list-entries
+				(mapcar (lambda (stash)
+						  (let ((cat (nth 0 stash))
+								(ts (nth 1 stash))
+								(items (nth 2 stash)))
+							(list (list id cat ts)
+								  (vector cat ts (number-to-string items)))))
+						stashes))
+		  (tabulated-list-print)
+		  (pop-to-buffer (current-buffer)))
 	  (message "No stashed categories for this file"))))
+
+(defun rich-text-stash-unstash-at-point ()
+  "Unstash the stash at point."
+  (interactive)
+  (let* ((id (tabulated-list-get-id)))
+	(unless id (user-error "No stash on this line"))
+	(let ((file-id (nth 0 id))
+		  (category (nth 1 id))
+		  (timestamp (nth 2 id)))
+	  (with-current-buffer (find-file-noselect file-id)
+		(rich-text-category-unstash category timestamp)))
+	(quit-window t)))
+
+(defun rich-text-stash-delete-at-point ()
+  "Delete the stash at point and refresh current buffer."
+  (interactive)
+  (let* ((entry (tabulated-list-get-id)))
+	(unless entry (user-error "No stash on this line"))
+	(let ((file-id (nth 0 entry))
+		  (category (nth 1 entry))
+		  (timestamp (nth 2 entry)))
+	  (when (yes-or-no-p (format "Delete stash %s (%s)? " category timestamp))
+		(rich-text-db-crud
+		 `[:delete :from stash
+		   :where (and (= id ,file-id)
+					   (= category ,category)
+					   (= timestamp ,timestamp))])
+		(rich-text-category-list-stashes-tabulated)
+		(message "Stash deleted")))))
+
+;;;; Persistence & Hidden
+
+(defvar-local rich-text-category-hidden-overlays '())
+
+(defun rich-text-category-ensure-meta-table ()
+  (condition-case err
+	  (rich-text-db-crud [:create-table :if-not-exists meta [id key value]])
+	(error (message "Warning: Could not create meta table: %S" err))))
+
+(defun rich-text-category-ensure-stash-table ()
+  (condition-case err
+	  (rich-text-db-crud [:create-table :if-not-exists stash [id category timestamp position text]])
+	(error (message "Warning: Could not create stash table: %S" err))))
+
+(defun rich-text-category-save-current ()
+  (when-let ((id (rich-text-buffer-or-file-id)))
+	(rich-text-category-ensure-meta-table)
+	(condition-case err
+		(progn
+		  (ignore-errors
+			(rich-text-db-crud
+			 `[:delete :from meta
+			   :where (and (= id ,id) (= key "current-category"))]))
+		  (rich-text-db-insert 'meta
+							  `([,id "current-category" ,rich-text-category-current])))
+	  (error (message "Warning: Could not save current category: %S" err)))))
+
+(defun rich-text-category-restore-current ()
+  (when-let ((id (rich-text-buffer-or-file-id)))
+	(condition-case err
+		(progn
+		  (rich-text-category-ensure-meta-table)
+		  (when-let ((result (car (rich-text-db-crud
+								  `[:select value :from meta
+									:where (and (= id ,id)
+												(= key "current-category"))]))))
+			(setq rich-text-category-current (car result))
+			(force-mode-line-update)
+			(message "Restored category: %s" rich-text-category-current)))
+	  (error (message "Warning: Could not restore category: %S" err)))))
+
+;;;###autoload
+(defun rich-text-category-hide (category)
+  (interactive
+   (list (completing-read "Hide category: "
+						  (rich-text-category-get-all)
+						  nil t)))
+  (let ((style-name (intern (format "category-%s" category)))
+		(hidden-data '())
+		(count 0))
+
+	(when (assoc category rich-text-category-hidden-overlays)
+	  (user-error "Category %s is already hidden" category))
+
+	(dolist (ov (overlays-in (point-min) (point-max)))
+	  (when (eq (overlay-get ov 'rich-text) style-name)
+		(let ((start (overlay-start ov))
+			  (end (overlay-end ov))
+			  (text (buffer-substring-no-properties
+					 (overlay-start ov)
+					 (overlay-end ov))))
+		  (push (list start end text) hidden-data)
+		  (setq count (+ count (- end start)))
+		  (overlay-put ov 'invisible t)
+		  (overlay-put ov 'hidden-category t))))
+
+	(push (cons category (nreverse hidden-data))
+		  rich-text-category-hidden-overlays)
+
+	(message "Hidden %d character%s in category %s (use unhide to restore)"
+			 count
+			 (if (= count 1) "" "s")
+			 category)))
+
+;;;###autoload
+(defun rich-text-category-unhide (category)
+  (interactive
+   (list (completing-read "Unhide category: "
+						  (mapcar #'car rich-text-category-hidden-overlays)
+						  nil t)))
+  (let* ((hidden-entry (assoc category rich-text-category-hidden-overlays))
+		 (style-name (intern (format "category-%s" category)))
+		 (count 0))
+
+	(unless hidden-entry
+	  (user-error "Category %s is not hidden" category))
+
+	(dolist (ov (overlays-in (point-min) (point-max)))
+	  (when (and (eq (overlay-get ov 'rich-text) style-name)
+				 (overlay-get ov 'hidden-category))
+		(overlay-put ov 'invisible nil)
+		(overlay-put ov 'hidden-category nil)
+		(setq count (+ count (- (overlay-end ov) (overlay-start ov))))))
+
+	(setq rich-text-category-hidden-overlays
+		  (assoc-delete-all category rich-text-category-hidden-overlays))
+
+	(message "Restored %d character%s in category %s"
+			 count
+			 (if (= count 1) "" "s")
+			 category)))
+
+;;;###autoload
+(defun rich-text-category-toggle-hide (category)
+  (interactive
+   (list (completing-read "Toggle hide category: "
+						  (append (rich-text-category-get-all)
+								  (mapcar #'car rich-text-category-hidden-overlays))
+						  nil t)))
+  (if (assoc category rich-text-category-hidden-overlays)
+	  (rich-text-category-unhide category)
+	(rich-text-category-hide category)))
+
+;;;###autoload
+(defun rich-text-category-list-hidden ()
+  (interactive)
+  (if rich-text-category-hidden-overlays
+	  (message "Hidden categories: %s"
+			   (mapconcat #'car rich-text-category-hidden-overlays ", "))
+	(message "No hidden categories")))
 
 ;;;###autoload
 (defun rich-text-category-clear-stashes (category)
-  "Permanently delete all stashes for CATEGORY in current file."
   (interactive
    (list (completing-read "Clear stashes for category: "
 						  (let ((id (rich-text-buffer-or-file-id)))
@@ -530,96 +645,6 @@ If TIMESTAMP is nil, restores the most recent stash."
 		 :where (and (= id ,id) (= category ,category))])
 	  (message "Cleared all stashes for category %s" category))))
 
-;;;###autoload
-(defun rich-text-category-hide (category)
-  "Temporarily hide all text in CATEGORY (can be restored later)."
-  (interactive
-   (list (completing-read "Hide category: "
-						  (rich-text-category-get-all)
-						  nil t)))
-  (let ((style-name (intern (format "category-%s" category)))
-		(hidden-data '())
-		(count 0))
-
-	;; Check if already hidden
-	(when (assoc category rich-text-category-hidden-overlays)
-	  (user-error "Category %s is already hidden" category))
-
-	;; Collect overlay data and make invisible
-	(dolist (ov (overlays-in (point-min) (point-max)))
-	  (when (eq (overlay-get ov 'rich-text) style-name)
-		(let ((start (overlay-start ov))
-			  (end (overlay-end ov))
-			  (text (buffer-substring-no-properties
-					 (overlay-start ov)
-					 (overlay-end ov))))
-		  (push (list start end text) hidden-data)
-		  (setq count (+ count (- end start)))
-		  ;; Make text invisible
-		  (overlay-put ov 'invisible t)
-		  (overlay-put ov 'hidden-category t))))
-
-	;; Store hidden data
-	(push (cons category (nreverse hidden-data))
-		  rich-text-category-hidden-overlays)
-
-	(message "Hidden %d character%s in category %s (use unhide to restore)"
-			 count
-			 (if (= count 1) "" "s")
-			 category)))
-
-;;;###autoload
-(defun rich-text-category-unhide (category)
-  "Restore previously hidden CATEGORY text."
-  (interactive
-   (list (completing-read "Unhide category: "
-						  (mapcar #'car rich-text-category-hidden-overlays)
-						  nil t)))
-  (let* ((hidden-entry (assoc category rich-text-category-hidden-overlays))
-		 (style-name (intern (format "category-%s" category)))
-		 (count 0))
-
-	(unless hidden-entry
-	  (user-error "Category %s is not hidden" category))
-
-	;; Make overlays visible again
-	(dolist (ov (overlays-in (point-min) (point-max)))
-	  (when (and (eq (overlay-get ov 'rich-text) style-name)
-				 (overlay-get ov 'hidden-category))
-		(overlay-put ov 'invisible nil)
-		(overlay-put ov 'hidden-category nil)
-		(setq count (+ count (- (overlay-end ov) (overlay-start ov))))))
-
-	;; Remove from hidden list
-	(setq rich-text-category-hidden-overlays
-		  (assoc-delete-all category rich-text-category-hidden-overlays))
-
-	(message "Restored %d character%s in category %s"
-			 count
-			 (if (= count 1) "" "s")
-			 category)))
-
-;;;###autoload
-(defun rich-text-category-toggle-hide (category)
-  "Toggle hide/unhide for CATEGORY."
-  (interactive
-   (list (completing-read "Toggle hide category: "
-						  (append (rich-text-category-get-all)
-								  (mapcar #'car rich-text-category-hidden-overlays))
-						  nil t)))
-  (if (assoc category rich-text-category-hidden-overlays)
-	  (rich-text-category-unhide category)
-	(rich-text-category-hide category)))
-
-;;;###autoload
-(defun rich-text-category-list-hidden ()
-  "List all currently hidden categories."
-  (interactive)
-  (if rich-text-category-hidden-overlays
-	  (message "Hidden categories: %s"
-			   (mapconcat #'car rich-text-category-hidden-overlays ", "))
-	(message "No hidden categories")))
-
 ;;;; Minor mode
 
 ;;;###autoload
@@ -631,34 +656,23 @@ If TIMESTAMP is nil, restores the most recent stash."
 	  (progn
 		(unless rich-text-mode
 		  (rich-text-mode 1))
-
-		;; Ensure all tables exist
 		(rich-text-category-ensure-meta-table)
 		(rich-text-category-ensure-stash-table)
-
-		;; Register styles and restore state
 		(rich-text-category-ensure-styles)
 		(rich-text-category-restore-current)
-
 		(add-hook 'after-change-functions
 				  #'rich-text-category-after-change nil t)
 		(add-hook 'after-save-hook
 				  #'rich-text-category-save-current nil t)
-
 		(unless (member '(:eval (format " [Cat:%s]" rich-text-category-current))
 					   mode-line-format)
 		  (setq mode-line-format
 				(append mode-line-format
-						'((:eval (format " [Cat:%s]" rich-text-category-current))))))
-
-		(message "Rich-text category mode enabled (current: %s)"
-				 rich-text-category-current))
-
+						'((:eval (format " [Cat:%s]" rich-text-category-current)))))))
 	(remove-hook 'after-change-functions
 				 #'rich-text-category-after-change t)
 	(remove-hook 'after-save-hook
-				 #'rich-text-category-save-current t)
-	(message "Rich-text category mode disabled")))
+				 #'rich-text-category-save-current t)))
 
 ;;;; Keymap
 
@@ -674,7 +688,9 @@ If TIMESTAMP is nil, restores the most recent stash."
 	(define-key map (kbd "C-c c H") #'rich-text-category-list-hidden)
 	(define-key map (kbd "C-c c s") #'rich-text-category-stash)
 	(define-key map (kbd "C-c c u") #'rich-text-category-unstash)
-	(define-key map (kbd "C-c c S") #'rich-text-category-list-stashes)
+	(define-key map (kbd "C-c c S") #'rich-text-category-list-stashes-tabulated)
+	(define-key map (kbd "C-c 1") #'rich-text-category-apply-1)
+	;; NO SNAPSHOT KEYS
 	map)
   "Keymap for rich-text-category-mode.")
 
