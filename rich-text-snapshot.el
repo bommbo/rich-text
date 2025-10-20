@@ -3,7 +3,6 @@
 (require 'rich-text-db)
 (require 'tabulated-list)
 (require 'seq)
-(require 'which-func)
 
 (defgroup rich-text-snapshot nil
   "Document snapshot management for rich-text buffers."
@@ -127,87 +126,6 @@
 
 ;;;; Diff Utilities
 
-(defun rich-text-snapshot--list-functions (content)
-  "List all function names in CONTENT (Emacs Lisp)."
-  (let ((functions '()))
-	(with-temp-buffer
-	  (insert content)
-	  (emacs-lisp-mode)
-	  (goto-char (point-min))
-	  (while (re-search-forward "^(defun \\([^ \t\n(]+\\)" nil t)
-		(push (match-string-no-properties 1) functions)))
-	(nreverse functions)))
-
-(defun rich-text-snapshot--extract-function (content function-name)
-  "Extract function FUNCTION-NAME from CONTENT."
-  (with-temp-buffer
-	(insert content)
-	(emacs-lisp-mode)
-	(goto-char (point-min))
-	(when (re-search-forward
-		   (format "^(defun %s\\b" (regexp-quote function-name)) nil t)
-	  (beginning-of-line)
-	  (let ((start (point)))
-		(condition-case nil
-			(progn
-			  (forward-sexp)
-			  (buffer-substring-no-properties start (point)))
-		  (error nil))))))
-
-;;;###autoload
-(defun rich-text-snapshot-diff-function-current (timestamp function-name)
-  "Compare a specific function between current buffer and a snapshot."
-  (interactive
-   (progn
-	 (unless (buffer-file-name)
-	   (user-error "Buffer must be associated with a file"))
-	 (let* ((ts (rich-text-snapshot--select-timestamp "Snapshot: "))
-			(id (buffer-file-name))
-			(current-content (buffer-string))
-			(snap (car (rich-text-db-crud
-						`[:select [content] :from snapshot
-						  :where (and (= id ,id) (= timestamp ,ts))])))
-			(funcs-current (rich-text-snapshot--list-functions current-content))
-			(funcs-snap (when snap (rich-text-snapshot--list-functions (car snap))))
-			(all-funcs (delete-dups (append funcs-current funcs-snap)))
-			(current-func (ignore-errors (which-function)))
-			(default-func (when (and current-func (member current-func all-funcs))
-							current-func))
-			(func (completing-read
-				   (if default-func
-					   (format "Function (default %s): " default-func)
-					 "Function: ")
-				   all-funcs nil nil nil nil default-func)))
-	   (list ts func))))
-
-  (unless (buffer-file-name)
-	(user-error "Buffer must be associated with a file"))
-
-  (let* ((id (buffer-file-name))
-		 (current-content (buffer-string))
-		 (snapshot (car (rich-text-db-crud
-						 `[:select [content]
-						   :from snapshot
-						   :where (and (= id ,id)
-									   (= timestamp ,timestamp))]))))
-
-	(unless snapshot
-	  (user-error "Snapshot not found"))
-
-	(when (string-empty-p function-name)
-	  (user-error "No function specified"))
-
-	(let* ((func-current (rich-text-snapshot--extract-function current-content function-name))
-		   (func-snap (rich-text-snapshot--extract-function (car snapshot) function-name)))
-
-	  (if (and func-current func-snap)
-		  (rich-text-snapshot--diff-strings
-		   func-current func-snap
-		   (format "Current: %s" function-name)
-		   (format "Snapshot @ %s: %s" timestamp function-name))
-		(user-error "Function '%s' not found in current buffer or snapshot"
-					function-name)))))
-
 (defun rich-text-snapshot--diff-strings (str1 str2 name1 name2)
   "Show diff between STR1 and STR2 using Ediff, then clean buffers and restore layout."
   (require 'ediff)
@@ -216,10 +134,10 @@
 		 (win-config (current-window-configuration)))
 	(with-current-buffer buf1
 	  (insert str1)
-	  (emacs-lisp-mode))
+	  (text-mode))
 	(with-current-buffer buf2
 	  (insert str2)
-	  (emacs-lisp-mode))
+	  (text-mode))
 
 	(let (cleanup)
 	  (setq cleanup
@@ -232,103 +150,6 @@
 	(let ((ediff-window-setup-function 'ediff-setup-windows-plain)
 		  (ediff-split-window-function 'split-window-horizontally))
 	  (ediff-buffers buf1 buf2))))
-
-;;;###autoload
-(defun rich-text-snapshot-diff-function (timestamp1 timestamp2 function-name)
-  "Compare a specific function between two snapshots."
-  (interactive
-   (progn
-	 (unless (buffer-file-name)
-	   (user-error "Buffer must be associated with a file"))
-	 (let* ((ts1 (rich-text-snapshot--select-timestamp "First snapshot: "))
-			(ts2 (rich-text-snapshot--select-timestamp "Second snapshot: "))
-			(id (buffer-file-name))
-			(snap1 (car (rich-text-db-crud
-						 `[:select [content] :from snapshot
-						   :where (and (= id ,id) (= timestamp ,ts1))])))
-			(snap2 (car (rich-text-db-crud
-						 `[:select [content] :from snapshot
-						   :where (and (= id ,id) (= timestamp ,ts2))])))
-			(funcs1 (when snap1 (rich-text-snapshot--list-functions (car snap1))))
-			(funcs2 (when snap2 (rich-text-snapshot--list-functions (car snap2))))
-			(all-funcs (delete-dups (append funcs1 funcs2)))
-			(current-func (ignore-errors (which-function)))
-			(default-func (when (and current-func (member current-func all-funcs))
-							current-func))
-			(func (completing-read
-				   (if default-func
-					   (format "Function (default %s): " default-func)
-					 "Function: ")
-				   all-funcs nil nil nil nil default-func)))
-	   (list ts1 ts2 func))))
-
-  (unless (buffer-file-name)
-	(user-error "Buffer must be associated with a file"))
-
-  (let* ((id (buffer-file-name))
-		 (snap1 (car (rich-text-db-crud
-					  `[:select [content] :from snapshot
-						:where (and (= id ,id) (= timestamp ,timestamp1))])))
-		 (snap2 (car (rich-text-db-crud
-					  `[:select [content] :from snapshot
-						:where (and (= id ,id) (= timestamp ,timestamp2))]))))
-
-	(unless (and snap1 snap2)
-	  (user-error "Snapshot not found"))
-
-	(when (string-empty-p function-name)
-	  (user-error "No function specified"))
-
-	(let* ((content1 (car snap1))
-		   (content2 (car snap2))
-		   (func1 (rich-text-snapshot--extract-function content1 function-name))
-		   (func2 (rich-text-snapshot--extract-function content2 function-name)))
-
-	  (if (and func1 func2)
-		  (rich-text-snapshot--diff-strings
-		   func1 func2
-		   (format "%s @ %s" function-name timestamp1)
-		   (format "%s @ %s" function-name timestamp2))
-		(user-error "Function '%s' not found in one or both snapshots"
-					function-name)))))
-
-;;;###autoload
-(defun rich-text-snapshot-show-functions (timestamp)
-  "Show all functions in a snapshot."
-  (interactive
-   (progn
-	 (unless (buffer-file-name)
-	   (user-error "Buffer must be associated with a file"))
-	 (list (rich-text-snapshot--select-timestamp))))
-
-  (unless (buffer-file-name)
-	(user-error "Buffer must be associated with a file"))
-
-  (let* ((id (buffer-file-name))
-		 (snapshot (car (rich-text-db-crud
-						 `[:select [content] :from snapshot
-						   :where (and (= id ,id) (= timestamp ,timestamp))]))))
-
-	(unless snapshot
-	  (user-error "Snapshot not found"))
-
-	(let ((funcs (rich-text-snapshot--list-functions (car snapshot))))
-	  (if funcs
-		  (with-current-buffer (get-buffer-create "*Snapshot Functions*")
-			(let ((inhibit-read-only t))
-			  (erase-buffer)
-			  (insert (format "Functions in: %s\n" timestamp))
-			  (insert (format "File: %s\n" (file-name-nondirectory id)))
-			  (insert (make-string 60 ?─) "\n\n")
-			  (dolist (func funcs)
-				(insert (format "• %s\n" func)))
-			  (insert (format "\nTotal: %d function%s\n"
-							  (length funcs)
-							  (if (= (length funcs) 1) "" "s")))
-			  (goto-char (point-min))
-			  (special-mode))
-			(pop-to-buffer (current-buffer)))
-		(message "No functions found in snapshot")))))
 
 ;;;###autoload
 (defun rich-text-snapshot-diff-full (timestamp1 timestamp2)
@@ -404,8 +225,7 @@
 	(define-key map "v"         #'rich-text-snapshot-list-view-at-point)
 	(define-key map "c"         #'rich-text-snapshot-list-compare-at-point)
 	(define-key map "C"         #'rich-text-snapshot-list-compare-full-at-point)
-	(define-key map "F"         #'rich-text-snapshot-list-compare-function-at-point)
-	(define-key map "f"         #'rich-text-snapshot-list-show-functions-at-point)
+	;; REMOVED: "F" and "f" for function diff
 	(define-key map "g"         #'rich-text-snapshot-list-refresh)
 	(define-key map "/"         #'rich-text-snapshot-list-filter)
 	(define-key map "L"         #'rich-text-snapshot-list-all)
@@ -436,7 +256,6 @@
 				   :order-by [(desc timestamp)]])))
 	(let ((all-rows (rich-text-db-crud query)))
 	  (if (not filter-term)
-		  ;; No filter: build entries normally
 		  (mapcar (lambda (row)
 					(let ((id (nth 0 row))
 						  (ts (nth 1 row))
@@ -448,7 +267,6 @@
 									(if (string-empty-p note) "-" note)
 									(format "%d" (length content))))))
 				  all-rows)
-		;; With filter: first build all entries, then filter them
 		(let ((entries (mapcar (lambda (row)
 								 (let ((id (nth 0 row))
 									   (ts (nth 1 row))
@@ -467,8 +285,8 @@
 								  (split-string filter-term " " t)))))
 			(seq-filter
 			 (lambda (entry)
-			   (let* ((key (car entry))               ; (id timestamp)
-					  (vec (cadr entry))              ; [filename ts note size]
+			   (let* ((key (car entry))
+					  (vec (cadr entry))
 					  (id (nth 0 key))
 					  (ts (nth 1 key))
 					  (note (aref vec 2))
@@ -569,15 +387,13 @@ Space-separated terms = OR match.
 		 `[:delete :from snapshot
 		   :where (and (= id ,file-id)
 					   (= timestamp ,timestamp))])
-		;; Refresh and try to keep cursor at same line number
 		(let ((inhibit-read-only t))
 		  (setq tabulated-list-entries (rich-text-snapshot-list--build-entries rich-text-snapshot-list--file-id rich-text-snapshot-list--filter-term))
 		  (tabulated-list-print t)
-		  ;; Move to same line number if possible
 		  (goto-char (point-min))
 		  (forward-line (1- current-line))
 		  (when (eobp)
-			(forward-line -1)  ; if went past end, go to last line
+			(forward-line -1)
 			(when (< (line-number-at-pos) 1)
 			  (goto-char (point-min)))))))
 	(message "🗑️ Snapshot deleted")))
@@ -649,41 +465,6 @@ Space-separated terms = OR match.
 	  (with-current-buffer (find-file-noselect file-id)
 		(rich-text-snapshot-diff-full timestamp1 timestamp2)))))
 
-(defun rich-text-snapshot-list-compare-function-at-point ()
-  (interactive)
-  (unless rich-text-snapshot--marked-for-compare
-	(user-error "Mark a snapshot first with 'c'"))
-  (let* ((entry (tabulated-list-get-id)))
-	(unless entry (user-error "No snapshot on this line"))
-	(let* ((file-id1 (nth 0 rich-text-snapshot--marked-for-compare))
-		   (ts1 (nth 1 rich-text-snapshot--marked-for-compare))
-		   (file-id2 (nth 0 entry))
-		   (ts2 (nth 1 entry)))
-	  (unless (string= file-id1 file-id2)
-		(user-error "Can only compare snapshots from the same file"))
-	  (let* ((snap1 (car (rich-text-db-crud
-						  `[:select [content] :from snapshot
-							:where (and (= id ,file-id1) (= timestamp ,ts1))])))
-			 (snap2 (car (rich-text-db-crud
-						  `[:select [content] :from snapshot
-							:where (and (= id ,file-id2) (= timestamp ,ts2))])))
-			 (funcs1 (when snap1 (rich-text-snapshot--list-functions (car snap1))))
-			 (funcs2 (when snap2 (rich-text-snapshot--list-functions (car snap2))))
-			 (all-funcs (delete-dups (append funcs1 funcs2)))
-			 (func (completing-read "Function: " all-funcs nil nil)))
-		(with-current-buffer (find-file-noselect file-id1)
-		  (rich-text-snapshot-diff-function ts1 ts2 func))
-		(setq-local rich-text-snapshot--marked-for-compare nil)
-		(message "Comparing '%s': %s vs %s" func ts1 ts2)))))
-
-(defun rich-text-snapshot-list-show-functions-at-point ()
-  (interactive)
-  (let* ((entry (tabulated-list-get-id)))
-	(unless entry (user-error "No snapshot on this line"))
-	(let ((timestamp (nth 1 entry)))
-	  (with-current-buffer (find-file-noselect (nth 0 entry))
-		(rich-text-snapshot-show-functions timestamp)))))
-
 ;;;###autoload
 (defun rich-text-snapshot-insert-full-from-other ()
   "Insert full content of any snapshot into current buffer."
@@ -692,7 +473,6 @@ Space-separated terms = OR match.
 	(unless all
 	  (user-error "No snapshots available"))
 
-	;; Build alist: (DISPLAY-STRING . TIMESTAMP)
 	(let* ((choices (mapcar (lambda (row)
 							  (let ((file (nth 0 row))
 									(ts (nth 1 row))
@@ -703,10 +483,10 @@ Space-separated terms = OR match.
 											  (if (string-empty-p note)
 												  ""
 												(format " (%s)" note)))
-									  ts))) ; ← 关键：value = timestamp
+									  ts)))
 							all))
 		   (selected (completing-read "Insert snapshot content: " choices nil t))
-		   (timestamp (cdr (assoc selected choices)))) ; ← 安全获取 timestamp
+		   (timestamp (cdr (assoc selected choices))))
 
 	  (unless timestamp
 		(user-error "Snapshot selection failed"))
