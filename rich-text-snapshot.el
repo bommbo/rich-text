@@ -153,6 +153,7 @@
 			  (forward-sexp)
 			  (buffer-substring-no-properties start (point)))
 		  (error nil))))))
+
 ;;;###autoload
 (defun rich-text-snapshot-diff-function-current (timestamp function-name)
   "Compare a specific function between current buffer and a snapshot."
@@ -212,7 +213,6 @@
   (require 'ediff)
   (let* ((buf1 (generate-new-buffer (format " *%s*" name1)))
 		 (buf2 (generate-new-buffer (format " *%s*" name2)))
-
 		 (win-config (current-window-configuration)))
 	(with-current-buffer buf1
 	  (insert str1)
@@ -392,6 +392,8 @@
 
 (defvar-local rich-text-snapshot-list--file-id nil)
 (defvar-local rich-text-snapshot--marked-for-compare nil)
+(defvar-local rich-text-snapshot-list--filter-term nil
+  "Current filter term for snapshot list.")
 
 (defvar rich-text-snapshot-list-mode-map
   (let ((map (make-sparse-keymap)))
@@ -405,6 +407,8 @@
 	(define-key map "F"         #'rich-text-snapshot-list-compare-function-at-point)
 	(define-key map "f"         #'rich-text-snapshot-list-show-functions-at-point)
 	(define-key map "g"         #'rich-text-snapshot-list-refresh)
+	(define-key map "/"         #'rich-text-snapshot-list-filter)
+	(define-key map "L"         #'rich-text-snapshot-list-all)
 	(define-key map "q"         #'quit-window)
 	map)
   "Keymap for snapshot list mode.")
@@ -420,7 +424,8 @@
   (setq tabulated-list-sort-key (cons "Time" t))
   (tabulated-list-init-header))
 
-(defun rich-text-snapshot-list--build-entries (file-id)
+(defun rich-text-snapshot-list--build-entries (file-id &optional filter-term)
+  "Build tabulated list entries, optionally filtered by FILTER-TERM."
   (let ((query (if file-id
 				   `[:select [id timestamp note content]
 					 :from snapshot
@@ -429,17 +434,54 @@
 				 `[:select [id timestamp note content]
 				   :from snapshot
 				   :order-by [(desc timestamp)]])))
-	(mapcar (lambda (row)
-			  (let ((id (nth 0 row))
-					(ts (nth 1 row))
-					(note (nth 2 row))
-					(content (nth 3 row)))
-				(list (list id ts)
-					  (vector (file-name-nondirectory id)
-							  ts
-							  (if (string-empty-p note) "-" note)
-							  (format "%d" (length content))))))
-			(rich-text-db-crud query))))
+	(let ((all-rows (rich-text-db-crud query)))
+	  (if (not filter-term)
+		  ;; No filter: build entries normally
+		  (mapcar (lambda (row)
+					(let ((id (nth 0 row))
+						  (ts (nth 1 row))
+						  (note (nth 2 row))
+						  (content (nth 3 row)))
+					  (list (list id ts)
+							(vector (file-name-nondirectory id)
+									ts
+									(if (string-empty-p note) "-" note)
+									(format "%d" (length content))))))
+				  all-rows)
+		;; With filter: first build all entries, then filter them
+		(let ((entries (mapcar (lambda (row)
+								 (let ((id (nth 0 row))
+									   (ts (nth 1 row))
+									   (note (nth 2 row))
+									   (content (nth 3 row)))
+								   (list (list id ts)
+										 (vector (file-name-nondirectory id)
+												 ts
+												 (if (string-empty-p note) "-" note)
+												 (format "%d" (length content))))))
+							   all-rows)))
+		  (let* ((and-mode (string-match-p "&&" filter-term))
+				 (terms (mapcar #'string-trim
+								(if and-mode
+									(split-string filter-term "&&" t)
+								  (split-string filter-term " " t)))))
+			(seq-filter
+			 (lambda (entry)
+			   (let* ((key (car entry))               ; (id timestamp)
+					  (vec (cadr entry))              ; [filename ts note size]
+					  (id (nth 0 key))
+					  (ts (nth 1 key))
+					  (note (aref vec 2))
+					  (filename (aref vec 0))
+					  (search-text (string-join (list filename ts note) " ")))
+				 (if and-mode
+					 (seq-every-p (lambda (term)
+									(string-match-p (regexp-quote term) search-text))
+								  terms)
+				   (seq-some (lambda (term)
+							   (string-match-p (regexp-quote term) search-text))
+							 terms))))
+			 entries)))))))
 
 ;;;###autoload
 (defun rich-text-snapshot-list (&optional current-file-only)
@@ -447,14 +489,18 @@
   (rich-text-snapshot-ensure-table)
   (let* ((file-id (when (or current-file-only (not (null current-file-only)))
 					(buffer-file-name)))
-		 (entries (rich-text-snapshot-list--build-entries file-id)))
+		 (entries (rich-text-snapshot-list--build-entries file-id rich-text-snapshot-list--filter-term)))
 	(if (null entries)
-		(message "No snapshots found%s"
-				 (if file-id " for this file" ""))
+		(message "No snapshots found%s%s"
+				 (if file-id " for this file" "")
+				 (if rich-text-snapshot-list--filter-term
+					 (format " (filter: %s)" rich-text-snapshot-list--filter-term)
+				   ""))
 	  (with-current-buffer (get-buffer-create "*Rich-Text Snapshots*")
 		(rich-text-snapshot-list-mode)
 		(setq rich-text-snapshot-list--file-id file-id)
 		(setq rich-text-snapshot--marked-for-compare nil)
+		(setq rich-text-snapshot-list--filter-term rich-text-snapshot-list--filter-term)
 		(setq tabulated-list-entries entries)
 		(tabulated-list-print t)
 		(goto-char (point-min)))
@@ -468,6 +514,8 @@
 ;;;###autoload
 (defun rich-text-snapshot-list-current ()
   (interactive)
+  (unless (buffer-file-name)
+	(user-error "Current buffer is not visiting a file"))
   (rich-text-snapshot-list t))
 
 (defun rich-text-snapshot-list-refresh ()
@@ -475,14 +523,28 @@
   (unless (eq major-mode 'rich-text-snapshot-list-mode)
 	(user-error "Not in snapshot list buffer"))
   (let ((file-id rich-text-snapshot-list--file-id)
+		(filter-term rich-text-snapshot-list--filter-term)
 		(origin-id (tabulated-list-get-id)))
-	(setq tabulated-list-entries (rich-text-snapshot-list--build-entries file-id))
+	(setq tabulated-list-entries (rich-text-snapshot-list--build-entries file-id filter-term))
 	(tabulated-list-print t)
 	(when origin-id
 	  (goto-char (point-min))
 	  (while (and (not (eobp))
 				  (not (equal (tabulated-list-get-id) origin-id)))
 		(forward-line 1)))))
+
+;;;###autoload
+(defun rich-text-snapshot-list-filter (term)
+  "Filter snapshot list by TERM.
+Space-separated terms = OR match.
+'&&'-separated terms = AND match."
+  (interactive "sFilter (space=OR, &&=AND): ")
+  (unless (eq major-mode 'rich-text-snapshot-list-mode)
+	(user-error "Not in snapshot list buffer"))
+  (setq rich-text-snapshot-list--filter-term
+		(unless (string-empty-p term) (string-trim term)))
+  (rich-text-snapshot-list-refresh)
+  (message "Filter: %s" (or rich-text-snapshot-list--filter-term "cleared")))
 
 (defun rich-text-snapshot-list-restore-at-point ()
   (interactive)
@@ -509,7 +571,7 @@
 					   (= timestamp ,timestamp))])
 		;; Refresh and try to keep cursor at same line number
 		(let ((inhibit-read-only t))
-		  (setq tabulated-list-entries (rich-text-snapshot-list--build-entries rich-text-snapshot-list--file-id))
+		  (setq tabulated-list-entries (rich-text-snapshot-list--build-entries rich-text-snapshot-list--file-id rich-text-snapshot-list--filter-term))
 		  (tabulated-list-print t)
 		  ;; Move to same line number if possible
 		  (goto-char (point-min))
