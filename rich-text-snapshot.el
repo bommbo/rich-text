@@ -684,6 +684,47 @@ Space-separated terms = OR match.
 	  (with-current-buffer (find-file-noselect (nth 0 entry))
 		(rich-text-snapshot-show-functions timestamp)))))
 
+;;;###autoload
+(defun rich-text-snapshot-insert-full-from-other ()
+  "Insert full content of any snapshot into current buffer."
+  (interactive)
+  (let* ((all (rich-text-db-crud '[:select [id timestamp note] :from snapshot :order-by [(desc timestamp)]])))
+	(unless all
+	  (user-error "No snapshots available"))
+
+	;; Build alist: (DISPLAY-STRING . TIMESTAMP)
+	(let* ((choices (mapcar (lambda (row)
+							  (let ((file (nth 0 row))
+									(ts (nth 1 row))
+									(note (nth 2 row)))
+								(cons (format "%s @ %s%s"
+											  (file-name-nondirectory file)
+											  ts
+											  (if (string-empty-p note)
+												  ""
+												(format " (%s)" note)))
+									  ts))) ; ← 关键：value = timestamp
+							all))
+		   (selected (completing-read "Insert snapshot content: " choices nil t))
+		   (timestamp (cdr (assoc selected choices)))) ; ← 安全获取 timestamp
+
+	  (unless timestamp
+		(user-error "Snapshot selection failed"))
+
+	  (let* ((row (car (rich-text-db-crud
+						`[:select [content id]
+						  :from snapshot
+						  :where (= timestamp ,timestamp)])))
+			 (content (nth 0 row))
+			 (source-file (nth 1 row)))
+		(if content
+			(progn
+			  (insert content)
+			  (message "✅ Inserted content from snapshot of %s @ %s"
+					   (file-name-nondirectory source-file)
+					   timestamp))
+		  (user-error "Snapshot content not found"))))))
+
 ;;;; Minor Mode
 
 (defvar rich-text-snapshot-mode-map
