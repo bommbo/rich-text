@@ -37,15 +37,16 @@
 
 ;; 声明外部函数
 (declare-function rich-text-clear-at-point "rich-text")
-(declare-function rich-text--word-bounds "rich-text") ; ← 新增声明
+(declare-function rich-text--word-bounds "rich-text")
 
 ;; ┌──────────────────────────────────────────────────────────────┐
-;; │  1. 字体选择（修改为单词范围）                             │
+;; │  1. 字体选择（修改为单词范围，支持替换）                   │
 ;; └──────────────────────────────────────────────────────────────┘
 
 ;;;###autoload
 (defun rich-text-set-font-overlay (font-name)
-  "Apply FONT-NAME to region or current word."
+  "Apply FONT-NAME to region or current word.
+新字体会替换该范围内的旧字体。"
   (interactive
    (list (completing-read "Font: " (font-family-list) nil t)))
   (let* ((bounds (if (use-region-p)
@@ -55,13 +56,28 @@
 		 (end (cdr bounds))
 		 (file-id (or buffer-file-name (buffer-name)))
 		 (style-tag (format "FONT:%s" font-name)))
+
+	;; 第一步：删除该范围内所有旧的 FONT: overlay 和数据库记录
+	(dolist (ov (overlays-in beg end))
+	  (let ((rt (overlay-get ov 'rich-text)))
+		(when (and (stringp rt) (string-prefix-p "FONT:" rt))
+		  (delete-overlay ov)
+		  ;; 同时从数据库删除旧记录
+		  (rich-text-db-delete 'ov
+			`(and (= id ,file-id)
+				  (= beg ,beg)
+				  (= end ,end)
+				  (like props "FONT:%"))))))
+
+	;; 第二步：创建新的 overlay 和数据库记录
 	(let ((ov (make-overlay beg end)))
 	  (overlay-put ov 'face `(:family ,font-name))
 	  (overlay-put ov 'rich-text style-tag)
 	  (overlay-put ov 'evaporate t)
 	  (rich-text-db-insert 'ov
-		`([,file-id ,beg ,end ,style-tag]))
-	  (message "Font '%s' applied to %d-%d" font-name beg end))))
+		`([,file-id ,beg ,end ,style-tag])))
+
+	(message "Font '%s' applied to %d-%d (replaced)" font-name beg end)))
 
 ;; ┌──────────────────────────────────────────────────────────────┐
 ;; │  2. 独立缩放操作（修改为单词范围）                         │
@@ -154,7 +170,7 @@
 					 regions)))))))
 
 ;; ┌──────────────────────────────────────────────────────────────┐
-;; │  4. 动态注册自定义样式，使其能被 rich-text 正确恢复         │
+;; │  4. 字体恢复（支持替换逻辑）                                │
 ;; └──────────────────────────────────────────────────────────────┘
 
 (defun rich-text-plus--get-font-props (style-name)
@@ -165,24 +181,68 @@
 		`(face (:family ,font-name))))))
 
 (defun rich-text-plus--restore-font-overlays ()
-  "Restore FONT:... overlays from database."
+  "Restore FONT:... overlays from database.
+确保同一范围的多条记录只使用最后一条（最新的）。"
   (when (buffer-file-name)
 	(let ((file-id (buffer-file-name)))
 	  (let ((font-records (rich-text-db-query 'ov [beg end props]
 											  `(and (= id ,file-id)
 													(like props "FONT:%")))))
-		(dolist (row font-records)
-		  (let* ((beg (nth 0 row))
-				 (end (nth 1 row))
-				 (props (nth 2 row))
-				 (font-name (substring props 5)))
-			(when (member font-name (font-family-list))
-			  (let ((ov (make-overlay beg end)))
-				(overlay-put ov 'face `(:family ,font-name))
-				(overlay-put ov 'rich-text props)
-				(overlay-put ov 'evaporate t)))))))))
+		;; 按 (beg, end) 分组
+		(let ((groups (make-hash-table :test 'equal)))
+		  (dolist (row font-records)
+			(let* ((beg (nth 0 row))
+				   (end (nth 1 row))
+				   (key (cons beg end)))
+			  (push row (gethash key groups))))
 
-;; 集成到 hook
+		  ;; 对每个范围，只使用最后一条记录创建 overlay
+		  (maphash (lambda (range rows)
+				 (let* ((latest-row (car rows))  ; 最后插入的记录
+						(beg (car range))
+						(end (cdr range))
+						(props (nth 2 latest-row))
+						(font-name (substring props 5)))
+				   (when (member font-name (font-family-list))
+					 (let ((ov (make-overlay beg end)))
+					   (overlay-put ov 'face `(:family ,font-name))
+					   (overlay-put ov 'rich-text props)
+					   (overlay-put ov 'evaporate t)))))
+			   groups))))))
+
+;; ┌──────────────────────────────────────────────────────────────┐
+;; │  5. 清理重复的数据库记录                                    │
+;; └──────────────────────────────────────────────────────────────┘
+
+(defun rich-text-plus--cleanup-duplicate-fonts ()
+  "Remove duplicate FONT records, keeping only the latest one per range."
+  (interactive)
+  (when (buffer-file-name)
+	(let ((file-id (buffer-file-name)))
+	  (let ((font-records (rich-text-db-query 'ov [beg end props]
+											  `(and (= id ,file-id)
+													(like props "FONT:%")))))
+		(let ((groups (make-hash-table :test 'equal)))
+		  (dolist (row font-records)
+			(let ((key (cons (nth 0 row) (nth 1 row))))
+			  (push row (gethash key groups))))
+
+		  ;; 删除每个范围内除了最后一条以外的所有记录
+		  (maphash (lambda (range rows)
+				 (dolist (old-row (cdr rows))  ; 跳过第一条（最新的）
+				   (rich-text-db-delete 'ov
+					 `(and (= id ,file-id)
+						   (= beg ,(car range))
+						   (= end ,(cdr range))
+						   (= props ,(nth 2 old-row))))))
+			   groups))
+
+		(message "Cleaned up duplicate font records")))))
+
+;; ┌──────────────────────────────────────────────────────────────┐
+;; │  6. 集成到 hook                                              │
+;; └──────────────────────────────────────────────────────────────┘
+
 (with-eval-after-load 'rich-text
   (advice-add 'rich-text-get-props :around
 	(lambda (orig-fn style-name &rest args)
@@ -193,4 +253,4 @@
   (add-hook 'find-file-hook #'rich-text-plus-restore-all-scales))
 
 (provide 'rich-text-plus)
-;;; rich-text-plus
+;;; rich-text-plus.el ends here
