@@ -210,49 +210,62 @@
   "Delete exactly one operation and update visual effect immediately."
   (interactive)
   (let* ((id (rich-text-tabulated--get-current-id))
-		 (file (car id))
-		 (beg (cadr id))
-		 (end (caddr id))
-		 (raw-props (cadddr id))
-		 (list-buf (current-buffer)))
-	(when (y-or-n-p (format "Delete this operation at %s:%s-%s? "
-						   (file-name-nondirectory file) beg end))
-	  ;; 1. 删除数据库记录
-	  (rich-text-db-crud
-	   `[:delete :from ov
-		 :where (and (= id ,file) (= beg ,beg) (= end ,end) (= props ,raw-props))])
-	  ;; 2. 精确删除 buffer 中匹配的 overlay
-	  (let ((buf (get-file-buffer file)))
-		(when buf
-		  (with-current-buffer buf
-			(cond
-			 ;; SCALE 样式：重建区域（已包含刷新）
-			 ((string-prefix-p "SCALE:" raw-props)
-			  (rich-text--rebuild-scale-overlays file beg end))
-			 ;; FONT 样式：字符串匹配 + 强制刷新
-			 ((string-prefix-p "FONT:" raw-props)
-			  (let ((deleted nil))
-				(dolist (ov (overlays-in beg end))
-				  (when (and (stringp (overlay-get ov 'rich-text))
-							 (string= (overlay-get ov 'rich-text) raw-props)
-							 (= (overlay-start ov) beg)
-							 (= (overlay-end ov) end))
-					(delete-overlay ov)
-					(setq deleted t)))
-				(when deleted
-				  (redisplay t))))
-			 ;; 内置样式：符号匹配
-			 (t
-			  (let ((target-symbol (condition-case nil (read raw-props) (error nil))))
-				(dolist (ov (overlays-in beg end))
-				  (when (and (eq (overlay-get ov 'rich-text) target-symbol)
-							 (= (overlay-start ov) beg)
-							 (= (overlay-end ov) end))
-					(delete-overlay ov)))))))))
-	  ;; 3. 刷新列表
-	  (switch-to-buffer list-buf)
-	  (rich-text-tabulated-refresh)
-	  (message "Deleted operation."))))
+         (file (car id))
+         (beg (cadr id))
+         (end (caddr id))
+         (raw-props (cadddr id))  ; e.g., "\"SCALE:1.2\"" or "highlight"
+         (list-buf (current-buffer)))
+    (when (y-or-n-p (format "Delete this operation at %s:%s-%s? "
+                           (file-name-nondirectory file) beg end))
+      ;; 1. 删除数据库记录
+      (rich-text-db-crud
+       `[:delete :from ov
+         :where (and (= id ,file) (= beg ,beg) (= end ,end) (= props ,raw-props))])
+
+      ;; 2. 尝试反序列化
+      (let ((deserialized (condition-case nil (read raw-props) (error nil))))
+        (cond
+         ;; 情况1: 动态样式 (FONT:... 或 SCALE:...)
+         ((and (stringp deserialized)
+               (or (string-prefix-p "FONT:" deserialized)
+                   (string-prefix-p "SCALE:" deserialized)))
+          (let ((buf (get-file-buffer file)))
+            (when buf
+              (with-current-buffer buf
+                (rich-text-plus--restore-dynamic-overlays)))))
+
+         ;; 情况2: 命名样式 (symbol, e.g., 'highlight, 'bold)
+         ((symbolp deserialized)
+          (let ((buf (get-file-buffer file)))
+            (when buf
+              (with-current-buffer buf
+                (dolist (ov (overlays-in beg end))
+                  (when (and (eq (overlay-get ov 'rich-text) deserialized)
+                             (= (overlay-start ov) beg)
+                             (= (overlay-end ov) end))
+                    (delete-overlay ov)))))
+            ;; 立即重绘
+            (when buf
+              (with-current-buffer buf
+                (redisplay t)))))
+
+         ;; 情况3: 其他（fallback to symbol read）
+         (t
+          (let ((target-symbol (condition-case nil (read raw-props) (error nil)))
+                (buf (get-file-buffer file)))
+            (when (and buf target-symbol)
+              (with-current-buffer buf
+                (dolist (ov (overlays-in beg end))
+                  (when (and (eq (overlay-get ov 'rich-text) target-symbol)
+                             (= (overlay-start ov) beg)
+                             (= (overlay-end ov) end))
+                    (delete-overlay ov)))
+                (redisplay t)))))))
+
+      ;; 3. 刷新列表
+      (switch-to-buffer list-buf)
+      (rich-text-tabulated-refresh)
+      (message "Deleted operation."))))
 
 (defun rich-text-tabulated-other-window ()
   (interactive)
