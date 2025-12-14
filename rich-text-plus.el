@@ -4,6 +4,9 @@
 (require 'rich-text-db)
 (require 'ov)
 
+(declare-function rich-text-clear-at-point "rich-text")
+(declare-function rich-text--word-bounds "rich-text")
+
 ;; 列表样式
 (define-rich-text plain-list "pl"
   (lambda () (list 'line-prefix "• ")))
@@ -40,67 +43,58 @@
 (declare-function rich-text--word-bounds "rich-text")
 
 ;; ┌──────────────────────────────────────────────────────────────┐
-;; │  1. 字体选择（修改为单词范围，支持替换）                   │
+;; │  1. 字体选择（修改为单词范围，支持替换）                     │
 ;; └──────────────────────────────────────────────────────────────┘
 
 ;;;###autoload
 (defun rich-text-set-font-overlay (font-name)
-  "Apply FONT-NAME to region or current word.
-新字体会替换该范围内的旧字体。"
+  "Apply FONT-NAME to region or current word, replacing any existing font overlay."
   (interactive
    (list (completing-read "Font: " (font-family-list) nil t)))
   (let* ((bounds (if (use-region-p)
-					 (cons (region-beginning) (region-end))
-				   (rich-text--word-bounds)))
-		 (beg (car bounds))
-		 (end (cdr bounds))
-		 (file-id (or buffer-file-name (buffer-name)))
-		 (style-tag (format "FONT:%s" font-name)))
+                     (cons (region-beginning) (region-end))
+                   (rich-text--word-bounds)))
+         (beg (car bounds))
+         (end (cdr bounds))
+         (file-id (or buffer-file-name (buffer-name)))
+         (tag (format "FONT:%s" font-name)))
 
-	;; 第一步：删除该范围内所有旧的 FONT: overlay 和数据库记录
-	(dolist (ov (overlays-in beg end))
-	  (let ((rt (overlay-get ov 'rich-text)))
-		(when (and (stringp rt) (string-prefix-p "FONT:" rt))
-		  (delete-overlay ov)
-		  ;; 同时从数据库删除旧记录
-		  (rich-text-db-delete 'ov
-			`(and (= id ,file-id)
-				  (= beg ,beg)
-				  (= end ,end)
-				  (like props "FONT:%"))))))
+    ;; Remove existing FONT: overlays in range
+    (dolist (ov (overlays-in beg end))
+      (let ((rt (overlay-get ov 'rich-text)))
+        (when (and (stringp rt) (string-prefix-p "FONT:" rt))
+          (delete-overlay ov))))
 
-	;; 第二步：创建新的 overlay 和数据库记录
-	(let ((ov (make-overlay beg end)))
-	  (overlay-put ov 'face `(:family ,font-name))
-	  (overlay-put ov 'rich-text style-tag)
-	  (overlay-put ov 'evaporate t)
-	  (rich-text-db-insert 'ov
-		`([,file-id ,beg ,end ,style-tag])))
-
-	(message "Font '%s' applied to %d-%d (replaced)" font-name beg end)))
+    ;; Apply new font if valid
+    (when (member font-name (font-family-list))
+      (let ((ov (make-overlay beg end nil t nil))) ; front-advance=t, rear-advance=nil
+        (overlay-put ov 'face `(:family ,font-name))
+        (overlay-put ov 'rich-text tag)
+        (overlay-put ov 'evaporate t))
+      (rich-text-db-insert 'ov `([,file-id ,beg ,end ,(prin1-to-string tag)])))))
 
 ;; ┌──────────────────────────────────────────────────────────────┐
-;; │  2. 独立缩放操作（修改为单词范围）                         │
+;; │  2. 独立缩放操作（修改为单词范围）                           │
 ;; └──────────────────────────────────────────────────────────────┘
 
 ;;;###autoload
 (defun rich-text-adjust-font-size (factor)
-  "Add a new independent scale operation over region or current word."
+  "Apply a scale operation to region or current word."
   (interactive)
   (let* ((bounds (if (use-region-p)
-					 (cons (region-beginning) (region-end))
-				   (rich-text--word-bounds)))
-		 (beg (car bounds))
-		 (end (cdr bounds))
-		 (file-id (or buffer-file-name (buffer-name)))
-		 (unique-id (format "scale-%d" (random 1000000)))
-		 (tag (format "SCALE:%.4f:%s" factor unique-id)))
-	(let ((ov (make-overlay beg end)))
-	  (overlay-put ov 'face `(:height ,factor))
-	  (overlay-put ov 'rich-text tag)
-	  (overlay-put ov 'evaporate t)
-	  (rich-text-db-insert 'ov `([,file-id ,beg ,end ,tag]))
-	  (message "Added scale factor %.2fx to %d-%d" factor beg end))))
+                     (cons (region-beginning) (region-end))
+                   (rich-text--word-bounds)))
+         (beg (car bounds))
+         (end (cdr bounds))
+         (file-id (or buffer-file-name (buffer-name)))
+         (unique-id (format "s%d" (random 1000000)))
+         (tag (format "SCALE:%.4f:%s" factor unique-id)))
+
+    (let ((ov (make-overlay beg end nil t nil)))
+      (overlay-put ov 'face `(:height ,factor))
+      (overlay-put ov 'rich-text tag)
+      (overlay-put ov 'evaporate t))
+    (rich-text-db-insert 'ov `([,file-id ,beg ,end ,(prin1-to-string tag)]))))
 
 ;;;###autoload
 (defun rich-text-increase-font-size ()
@@ -114,63 +108,56 @@
   (interactive)
   (rich-text-adjust-font-size 0.8333333333333334))
 
-;; 重建缩放效果（基于所有剩余操作）
-(defun rich-text--rebuild-scale-overlays (file beg end)
-  "Rebuild scale effect from all remaining SCALE records in region [BEG, END)."
-  (let ((buf (get-file-buffer file)))
-	(when buf
-	  (with-current-buffer buf
-		;; 1. 删除该区域所有 SCALE 相关 overlay
-		(dolist (ov (overlays-in beg end))
-		  (let ((rt (overlay-get ov 'rich-text)))
-			(when (and (stringp rt)
-					   (or (string-prefix-p "SCALE:" rt)
-						   (string= rt "SCALE-TOTAL")))
-			  (delete-overlay ov))))
-		;; 2. 从数据库计算总 height
-		(let ((rows (rich-text-db-query 'ov [beg end props]
-										`(and (= id ,file)
-											  (<= beg ,end)
-											  (>= end ,beg)
-											  (like props "SCALE:%")))))
-		  (when rows
-			(let ((total-height 1.0))
-			  (dolist (row rows)
-				(let* ((props (nth 2 row))
-					   (end-pos (string-match ":" props 6)))
-				  (when end-pos
-					(let ((factor (string-to-number (substring props 6 end-pos))))
-					  (setq total-height (* total-height factor))))))
-			  ;; 3. 创建总效果 overlay
-			  (let ((ov (make-overlay beg end)))
-				(overlay-put ov 'face `(:height ,total-height))
-				(overlay-put ov 'rich-text "SCALE-TOTAL")
-				(overlay-put ov 'evaporate t)))))))))
-
 ;; ┌──────────────────────────────────────────────────────────────┐
-;; │  3. 自动恢复所有效果                                        │
+;; │ 3.恢复动态样式（FONT / SCALE）                               │
 ;; └──────────────────────────────────────────────────────────────┘
 
-(defun rich-text-plus-restore-all-scales ()
-  "Restore all SCALE overlays from database when opening a file."
-  (when (buffer-file-name)
-	(let ((file-id (buffer-file-name)))
-	  (let ((scale-records (rich-text-db-query 'ov [beg end props]
-											   `(and (= id ,file-id)
-													 (like props "SCALE:%")))))
-		(when scale-records
-		  (let ((regions (make-hash-table :test 'equal)))
-			(dolist (row scale-records)
-			  (let ((beg (nth 0 row))
-					(end (nth 1 row)))
-				(push row (gethash (cons beg end) regions))))
-			(maphash (lambda (range rows)
-					   (rich-text--rebuild-scale-overlays
-						file-id (car range) (cdr range)))
-					 regions)))))))
+(defun rich-text-plus--restore-dynamic-overlays ()
+  "Restore FONT: and SCALE: overlays from database."
+  (when-let ((file-id (buffer-file-name)))
+    ;; Clear existing dynamic overlays to avoid duplication
+    (dolist (ov (overlays-in (point-min) (point-max)))
+      (let ((rt (overlay-get ov 'rich-text)))
+        (when (and (stringp rt)
+                   (or (string-prefix-p "FONT:" rt)
+                       (string-prefix-p "SCALE:" rt)))
+          (delete-overlay ov))))
 
+    ;; Query DB for quoted strings like "\"FONT:...\""
+    (let ((records (rich-text-db-query 'ov [beg end props]
+                                       `(and (= id ,file-id)
+                                             (or (like props "\"FONT:%\"")
+                                                 (like props "\"SCALE:%\""))))))
+      (dolist (row records)
+        (let* ((beg (nth 0 row))
+               (end (nth 1 row))
+               (props-str (nth 2 row))
+               (style-val (condition-case nil (read props-str) (error props-str)))
+               created)
+
+          (when (and (stringp style-val) (> (- end beg) 0))
+            (cond
+             ((string-prefix-p "FONT:" style-val)
+              (let ((font-name (substring style-val 5)))
+                (when (member font-name (font-family-list))
+                  (let ((ov (make-overlay beg end nil t nil)))
+                    (overlay-put ov 'face `(:family ,font-name))
+                    (overlay-put ov 'rich-text style-val)
+                    (overlay-put ov 'evaporate t))
+                  (setq created t))))
+
+             ((string-prefix-p "SCALE:" style-val)
+              (let* ((parts (split-string style-val ":"))
+                     (factor-str (nth 1 parts))
+                     (factor (when factor-str (string-to-number factor-str))))
+                (when (and factor (> factor 0))
+                  (let ((ov (make-overlay beg end nil t nil)))
+                    (overlay-put ov 'face `(:height ,factor))
+                    (overlay-put ov 'rich-text style-val)
+                    (overlay-put ov 'evaporate t))
+                  (setq created t)))))))))))
 ;; ┌──────────────────────────────────────────────────────────────┐
-;; │  4. 字体恢复（支持替换逻辑）                                │
+;; │  4. 字体恢复（支持替换逻辑）                                 │
 ;; └──────────────────────────────────────────────────────────────┘
 
 (defun rich-text-plus--get-font-props (style-name)
@@ -211,7 +198,7 @@
 			   groups))))))
 
 ;; ┌──────────────────────────────────────────────────────────────┐
-;; │  5. 清理重复的数据库记录                                    │
+;; │  5. 清理重复的数据库记录                                     │
 ;; └──────────────────────────────────────────────────────────────┘
 
 (defun rich-text-plus--cleanup-duplicate-fonts ()
@@ -244,13 +231,13 @@
 ;; └──────────────────────────────────────────────────────────────┘
 
 (with-eval-after-load 'rich-text
-  (advice-add 'rich-text-get-props :around
-	(lambda (orig-fn style-name &rest args)
-	  (or (rich-text-plus--get-font-props style-name)
-		  (apply orig-fn style-name args))))
-
-  (add-hook 'find-file-hook #'rich-text-plus--restore-font-overlays)
-  (add-hook 'find-file-hook #'rich-text-plus-restore-all-scales))
+  (remove-hook 'find-file-hook #'rich-text-plus--restore-font-overlays)
+  (remove-hook 'find-file-hook #'rich-text-plus-restore-all-scales)
+  (add-hook 'find-file-hook #'rich-text-plus--restore-dynamic-overlays)
+  (advice-add 'switch-to-buffer :after
+              (lambda (&rest _)
+                (when (buffer-file-name)
+                  (rich-text-plus--restore-dynamic-overlays)))))
 
 (provide 'rich-text-plus)
 ;;; rich-text-plus.el ends here
